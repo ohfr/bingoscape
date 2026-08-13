@@ -21,7 +21,7 @@ jest.mock("@/app/actions/goal-groups", () => ({
 jest.mock("../compact-goal-tree", () => ({
   CompactGoalTree: () => null,
 }))
-import type { Tile } from "@/app/actions/events"
+import type { Tile } from "@/types/model"
 
 const baseTile: Tile = {
   id: "tile-1",
@@ -76,7 +76,7 @@ describe("BingoTile battleship hits", () => {
         {
           id: "tts-1",
           teamId: "team-atk",
-          status: "approved",
+          status: "completed",
           createdAt: new Date(),
           updatedAt: new Date(),
           tileId: "tile-1",

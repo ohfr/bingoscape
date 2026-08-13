@@ -1,5 +1,10 @@
 "use server"
 
+import { eq, and, asc, sum, sql, desc, inArray } from "drizzle-orm"
+import { nanoid } from "nanoid"
+import { revalidatePath } from "next/cache"
+import { getEventById } from "@/server/queries/events"
+
 import { getServerAuthSession } from "@/server/auth"
 import { db } from "@/server/db"
 import {
@@ -32,186 +37,36 @@ import {
   notifications,
   eventRules,
 } from "@/server/db/schema"
-import { eq, and, asc, sum, sql, desc } from "drizzle-orm"
-import { nanoid } from "nanoid"
-import { revalidatePath } from "next/cache"
-import type { GoalValue } from "./goals"
 import { logger } from "@/lib/logger"
 
-export interface Image {
-  id: string
-  path: string
-  createdAt?: Date
-  updatedAt?: Date
-}
-
-export interface SubmissionComment {
-  id: string
-  submissionId: string
-  comment: string
-  createdAt: Date
-  updatedAt: Date
-  author: {
-    id: string
-    name: string | null
-    runescapeName: string | null
-  }
-}
-
-export interface Submission {
-  id: string
-  teamTileSubmissionId: string
-  image: Image
-  status: "pending" | "approved" | "needs_review"
-  reviewedBy: string | null
-  reviewedAt: Date | null
-  createdAt: Date
-  updatedAt: Date
-  user: {
-    id: string
-    name: string | null
-    runescapeName: string | null
-  }
-  goalId?: string | null
-  goal?: Goal | null
-  submissionValue: number | null
-  comments?: SubmissionComment[]
-  // Auto-submission metadata
-  isAutoSubmission?: boolean
-  sourceNpcId?: number | null
-  sourceName?: string | null
-  sourceItemId?: number | null
-  pluginAccountName?: string | null
-  sourceType?: string | null
-  locationWorldX?: number | null
-  locationWorldY?: number | null
-  locationPlane?: number | null
-  locationWorldNumber?: number | null
-  locationRegionId?: number | null
-}
-
-export interface TeamTileSubmission {
-  id: string
-  teamId: string
-  status: "pending" | "approved" | "needs_review"
-  createdAt: Date
-  updatedAt: Date
-  tileId: string
-  reviewedBy: string | null
-  submissions: Submission[]
-  team: Team
-}
-
-export interface EventParticipant {
-  eventId: string
-  userId: string
-  role: "admin" | "management" | "participant"
-  createdAt: Date
-  updatedAt: Date
-}
-
-export interface TeamProgress {
-  id?: string
-  updatedAt?: Date
-  teamId: string
-  goalId: string
-  currentValue: number
-}
-
-export interface Goal {
-  id: string
-  description: string
-  targetValue: number
-  goalType?: "generic" | "item"
-  createdAt?: Date
-  updatedAt?: Date
-  tileId: string
-  goalValues?: GoalValue[] // Make goalValues optional
-  teamProgress?: TeamProgress[] // Make teamProgress optional
-  itemGoal?: {
-    id: string
-    goalId: string
-    itemId: number
-    baseName: string
-    exactVariant: string | null
-    imageUrl: string
-    createdAt: Date
-    updatedAt: Date
-  } | null
-}
-
-export interface Tile {
-  id: string
-  title: string
-  description: string
-  headerImage: string | null
-  weight: number
-  index: number
-  createdAt: Date
-  updatedAt: Date
-  bingoId: string
-  isHidden: boolean
-  tier: number
-  teamTileSubmissions?: TeamTileSubmission[]
-  goals?: Goal[]
-}
-
-export interface Bingo {
-  id: string
-  eventId: string
-  title: string
-  description: string | null
-  rows: number
-  columns: number
-  codephrase: string
-  createdAt: Date
-  updatedAt: Date
-  locked: boolean
-  visible: boolean
-  bingoType: "standard" | "progression" | "battleship"
-  tiersUnlockRequirement: number
-  tiles?: Tile[]
-}
-
-export interface Clan {
-  id: string
-  name: string
-}
-
-export interface Team {
-  id: string
-  name: string
-  eventId: string
-  createdAt: Date
-  updatedAt: Date
-}
-
-export interface Event {
-  id: string
-  title: string
-  description: string | null
-  gameType: "osrs" | "rs3"
-  startDate: Date
-  endDate: Date
-  creatorId: string | null
-  clanId: string | null
-  createdAt: Date
-  updatedAt: Date
-  locked: boolean
-  public: boolean
-  bingos?: Bingo[]
-  clan?: Clan | null
-  teams?: Team[]
-  eventParticipants?: EventParticipant[]
-  minimumBuyIn: number
-  basePrizePool: number
-  registrationDeadline: Date | null
-  requiresApproval: boolean
-}
+import type { Event } from "@/types/model"
 
 export interface EventData {
-  event: Event
+  event: Event & { role?: EventRole }
   totalPrizePool: number
+
+  participantData?: {
+    team: {
+      id: string
+      name: string
+      memberCount: number
+    } | null
+    progress: {
+      completedTiles: number
+      totalTiles: number
+    } | null
+  }
+
+  managerData?: {
+    actionItems: {
+      pendingRegistrations: number
+      pendingSubmissions: number
+    }
+    eventStats: {
+      totalParticipants: number
+      activeTeams: number
+    }
+  }
 }
 
 export interface GetEventByIdResult {
@@ -265,6 +120,7 @@ export async function createEvent(formData: FormData) {
   const startDateStr = formData.get("startDate") as string
   const endDateStr = formData.get("endDate") as string
   const registrationDeadlineStr = formData.get("registrationDeadline") as string
+  const timezone = (formData.get("timezone") as string) || "UTC"
   const bpp = formData.get("basePrizePool") as string
   const mbi = formData.get("minimumBuyIn") as string
   const requiresApproval = formData.get("requiresApproval") === "true"
@@ -312,6 +168,7 @@ export async function createEvent(formData: FormData) {
           startDate,
           endDate,
           registrationDeadline,
+          timezone,
           basePrizePool,
           minimumBuyIn,
           creatorId: session.user.id,
@@ -331,9 +188,26 @@ export async function createEvent(formData: FormData) {
 
     revalidatePath("/")
 
+    if (newEvent) {
+      logger.info(
+        {
+          eventId: newEvent.id,
+          creatorId: session.user.id,
+          gameType: newEvent.gameType,
+          requiresApproval: newEvent.requiresApproval,
+          basePrizePool: newEvent.basePrizePool,
+          minimumBuyIn: newEvent.minimumBuyIn,
+        },
+        "Event created successfully"
+      )
+    }
+
     return { success: !!newEvent }
   } catch (error) {
-    logger.error({ error }, "Error creating event")
+    logger.error(
+      { error, action: "createEvent", userId: session.user.id },
+      "Error creating event"
+    )
     return { success: false, error: "Failed to create event" }
   }
 }
@@ -373,56 +247,6 @@ export async function getUserRole(eventId: string): Promise<EventRole | null> {
   } catch (error) {
     logger.error({ error }, "Error fetching user role")
     return null
-  }
-}
-
-// Modify the getEventById function to handle non-participants
-export async function getEventById(
-  eventId: string
-): Promise<GetEventByIdResult | null> {
-  const event = await db.query.events.findFirst({
-    where: eq(events.id, eventId),
-    with: {
-      bingos: {
-        orderBy: [asc(bingos.createdAt)],
-        with: {
-          tiles: {
-            orderBy: [asc(tiles.index)],
-            with: {
-              teamTileSubmissions: {
-                with: {
-                  submissions: {
-                    with: {
-                      image: true,
-                      user: true,
-                    },
-                  },
-                  team: true,
-                },
-              },
-              goals: {
-                with: {
-                  teamProgress: true,
-                },
-              },
-            },
-          },
-        },
-      },
-      clan: true,
-      teams: true,
-    },
-  })
-
-  if (!event) {
-    return null
-  }
-
-  const userRole = await getUserRole(eventId)
-
-  return {
-    event,
-    userRole,
   }
 }
 
@@ -535,21 +359,241 @@ export async function getEvents(userId: string): Promise<EventData[]> {
       orderBy: events.createdAt,
     })
 
-    const eventDataPromises = userEvents.map(async (event) => {
-      const prizePoolData = await calculateEventPrizePool(event.id)
+    if (userEvents.length === 0) return []
+
+    const eventIds = userEvents.map((e) => e.id)
+
+    // 1. Bulk Prize Pool Queries
+    const buyInsResult = await db
+      .select({
+        eventId: eventParticipants.eventId,
+        total: sql<number>`COALESCE(SUM(${eventBuyIns.amount}), 0)`.mapWith(
+          Number
+        ),
+      })
+      .from(eventBuyIns)
+      .innerJoin(
+        eventParticipants,
+        eq(eventBuyIns.eventParticipantId, eventParticipants.id)
+      )
+      .where(inArray(eventParticipants.eventId, eventIds))
+      .groupBy(eventParticipants.eventId)
+
+    const donationsResult = await db
+      .select({
+        eventId: eventParticipants.eventId,
+        total: sql<number>`COALESCE(SUM(${eventDonations.amount}), 0)`.mapWith(
+          Number
+        ),
+      })
+      .from(eventDonations)
+      .innerJoin(
+        eventParticipants,
+        eq(eventDonations.eventParticipantId, eventParticipants.id)
+      )
+      .where(inArray(eventParticipants.eventId, eventIds))
+      .groupBy(eventParticipants.eventId)
+
+    const buyInsMap = new Map(buyInsResult.map((r) => [r.eventId, r.total]))
+    const donationsMap = new Map(
+      donationsResult.map((r) => [r.eventId, r.total])
+    )
+
+    // Identify which events the user manages
+    const managedEventIds = userEvents
+      .filter(
+        (e) =>
+          e.creatorId === userId ||
+          e.eventParticipants[0]?.role === "admin" ||
+          e.eventParticipants[0]?.role === "management"
+      )
+      .map((e) => e.id)
+
+    // 2. Manager Data (if any managed events)
+    const managerDataMap = new Map()
+    if (managedEventIds.length > 0) {
+      const pendingRegResult = await db
+        .select({
+          eventId: eventRegistrationRequests.eventId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(eventRegistrationRequests)
+        .where(
+          and(
+            inArray(eventRegistrationRequests.eventId, managedEventIds),
+            eq(eventRegistrationRequests.status, "pending")
+          )
+        )
+        .groupBy(eventRegistrationRequests.eventId)
+
+      const pendingSubResult = await db
+        .select({
+          eventId: teams.eventId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(submissions)
+        .innerJoin(
+          teamTileSubmissions,
+          eq(submissions.teamTileSubmissionId, teamTileSubmissions.id)
+        )
+        .innerJoin(teams, eq(teamTileSubmissions.teamId, teams.id))
+        .where(
+          and(
+            inArray(teams.eventId, managedEventIds),
+            eq(submissions.status, "pending")
+          )
+        )
+        .groupBy(teams.eventId)
+
+      const totalPartResult = await db
+        .select({
+          eventId: eventParticipants.eventId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(eventParticipants)
+        .where(inArray(eventParticipants.eventId, managedEventIds))
+        .groupBy(eventParticipants.eventId)
+
+      const activeTeamsResult = await db
+        .select({
+          eventId: teams.eventId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(teams)
+        .where(inArray(teams.eventId, managedEventIds))
+        .groupBy(teams.eventId)
+
+      for (const id of managedEventIds) {
+        managerDataMap.set(id, {
+          actionItems: {
+            pendingRegistrations:
+              pendingRegResult.find((r) => r.eventId === id)?.count ?? 0,
+            pendingSubmissions:
+              pendingSubResult.find((r) => r.eventId === id)?.count ?? 0,
+          },
+          eventStats: {
+            totalParticipants:
+              totalPartResult.find((r) => r.eventId === id)?.count ?? 0,
+            activeTeams:
+              activeTeamsResult.find((r) => r.eventId === id)?.count ?? 0,
+          },
+        })
+      }
+    }
+
+    // 3. Participant Data
+    const participantDataMap = new Map()
+    const userTeams = await db
+      .select({
+        eventId: teams.eventId,
+        teamId: teams.id,
+        teamName: teams.name,
+      })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+      .where(
+        and(inArray(teams.eventId, eventIds), eq(teamMembers.userId, userId))
+      )
+
+    const userTeamIds = userTeams.map((t) => t.teamId)
+    let teamMemberCounts: { teamId: string; count: number }[] = []
+    let completedTilesCount: { teamId: string; count: number }[] = []
+
+    if (userTeamIds.length > 0) {
+      teamMemberCounts = await db
+        .select({
+          teamId: teamMembers.teamId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(teamMembers)
+        .where(inArray(teamMembers.teamId, userTeamIds))
+        .groupBy(teamMembers.teamId)
+
+      completedTilesCount = await db
+        .select({
+          teamId: teamTileSubmissions.teamId,
+          count: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(teamTileSubmissions)
+        .where(
+          and(
+            inArray(teamTileSubmissions.teamId, userTeamIds),
+            eq(teamTileSubmissions.status, "completed")
+          )
+        )
+        .groupBy(teamTileSubmissions.teamId)
+    }
+
+    const bingoTotalTilesResult = await db
+      .select({
+        bingoId: tiles.bingoId,
+        count: sql<number>`count(*)`.mapWith(Number),
+      })
+      .from(tiles)
+      .where(
+        inArray(
+          tiles.bingoId,
+          userEvents.flatMap((e) => e.bingos?.map((b) => b.id) ?? [])
+        )
+      )
+      .groupBy(tiles.bingoId)
+
+    const tilesCountMap = new Map(
+      bingoTotalTilesResult.map((r) => [r.bingoId, r.count])
+    )
+
+    for (const t of userTeams) {
+      const memberCount =
+        teamMemberCounts.find((r) => r.teamId === t.teamId)?.count ?? 0
+      const completedTiles =
+        completedTilesCount.find((r) => r.teamId === t.teamId)?.count ?? 0
+
+      const eventBingos = userEvents.find((e) => e.id === t.eventId)?.bingos
+      const firstBingoId = eventBingos?.[0]?.id
+      const totalTiles = firstBingoId
+        ? (tilesCountMap.get(firstBingoId) ?? 0)
+        : 0
+
+      participantDataMap.set(t.eventId, {
+        team: {
+          id: t.teamId,
+          name: t.teamName,
+          memberCount,
+        },
+        progress: {
+          completedTiles,
+          totalTiles,
+        },
+      })
+    }
+
+    const eventData = userEvents.map((event) => {
+      const role =
+        event.creatorId === userId
+          ? "admin"
+          : (event.eventParticipants[0]?.role ?? "participant")
+
+      const basePrizePool = event.basePrizePool
+      const totalBuyIns = buyInsMap.get(event.id) ?? 0
+      const totalDonations = donationsMap.get(event.id) ?? 0
+      const totalPrizePool = basePrizePool + totalBuyIns + totalDonations
+
+      const isManager = role === "admin" || role === "management"
+
       return {
         event: {
           ...event,
-          role:
-            event.creatorId === userId
-              ? "admin"
-              : (event.eventParticipants[0]?.role ?? "participant"),
+          role,
         },
-        totalPrizePool: prizePoolData.totalPrizePool,
+        totalPrizePool,
+        ...(isManager && managerDataMap.has(event.id)
+          ? { managerData: managerDataMap.get(event.id) }
+          : {}),
+        participantData: participantDataMap.get(event.id) ?? undefined,
       }
     })
 
-    return await Promise.all(eventDataPromises)
+    return eventData
   } catch (error) {
     logger.error({ error }, "Error fetching events")
     throw new Error("Failed to fetch events")
@@ -564,6 +608,7 @@ export async function updateEvent(
     startDate: string
     endDate: string
     registrationDeadline: string | null
+    timezone?: string
     minimumBuyIn: number
     basePrizePool: number
     locked?: boolean
@@ -582,6 +627,7 @@ export async function updateEvent(
         registrationDeadline: eventData.registrationDeadline
           ? new Date(eventData.registrationDeadline)
           : null,
+        timezone: eventData.timezone,
         minimumBuyIn: eventData.minimumBuyIn,
         basePrizePool: eventData.basePrizePool,
         locked: eventData.locked,
@@ -594,9 +640,25 @@ export async function updateEvent(
     // Revalidate the event page to reflect the changes
     revalidatePath(`/events/${eventId}`)
 
+    logger.info(
+      {
+        eventId,
+        action: "updateEvent",
+        locked: eventData.locked,
+        public: eventData.public,
+        requiresApproval: eventData.requiresApproval,
+        basePrizePool: eventData.basePrizePool,
+        minimumBuyIn: eventData.minimumBuyIn,
+      },
+      "Event updated successfully"
+    )
+
     return { success: true }
   } catch (error) {
-    logger.error({ error }, "Error updating event")
+    logger.error(
+      { error, eventId, action: "updateEvent" },
+      "Error updating event"
+    )
     throw new Error("Failed to update event")
   }
 }
@@ -758,58 +820,76 @@ export async function requestToJoinEvent(eventId: string, message = "") {
 export async function joinEvent(eventId: string, override = false) {
   const session = await getServerAuthSession()
   if (!session || !session.user) {
-    throw new Error("You must be logged in to join an event")
+    return { success: false, error: "You must be logged in to join an event" }
   }
 
-  const event = await db.query.events.findFirst({
-    where: eq(events.id, eventId),
-  })
+  try {
+    const event = await db.query.events.findFirst({
+      where: eq(events.id, eventId),
+    })
 
-  if (!event) {
-    throw new Error("Event not found")
-  }
-
-  // If the event requires approval and we're not overriding, redirect to request flow
-  if (event.requiresApproval && !override) {
-    throw new Error(
-      "This event requires approval to join. Please submit a registration request."
-    )
-  }
-
-  // Skip registration checks if override is true and user is admin
-  if (!override) {
-    const registrationStatus = await isRegistrationOpen(eventId)
-
-    if (!registrationStatus.isOpen) {
-      throw new Error(
-        registrationStatus.reason ?? "Registration is closed for this event"
-      )
+    if (!event) {
+      return { success: false, error: "Event not found" }
     }
-  } else {
-    // If override is true, verify the user is an admin
-    if (event.creatorId !== session.user.id) {
-      throw new Error(
-        "You don't have permission to override registration restrictions"
-      )
+
+    // If the event requires approval and we're not overriding, redirect to request flow
+    if (event.requiresApproval && !override) {
+      return {
+        success: false,
+        error:
+          "This event requires approval to join. Please submit a registration request.",
+      }
+    }
+
+    // Skip registration checks if override is true and user is admin
+    if (!override) {
+      const registrationStatus = await isRegistrationOpen(eventId)
+
+      if (!registrationStatus.isOpen) {
+        return {
+          success: false,
+          error:
+            registrationStatus.reason ??
+            "Registration is closed for this event",
+        }
+      }
+    } else {
+      // If override is true, verify the user is an admin
+      if (event.creatorId !== session.user.id) {
+        return {
+          success: false,
+          error:
+            "You don't have permission to override registration restrictions",
+        }
+      }
+    }
+
+    const existingParticipant = await db.query.eventParticipants.findFirst({
+      where: (ep, { and, eq }) =>
+        and(eq(ep.eventId, eventId), eq(ep.userId, session.user.id)),
+    })
+
+    if (existingParticipant) {
+      return {
+        success: false,
+        error: "You are already a participant in this event",
+      }
+    }
+
+    await db.insert(eventParticipants).values({
+      eventId,
+      userId: session.user.id,
+      role: "participant",
+    })
+
+    return { success: true }
+  } catch (error) {
+    logger.error({ error }, "Error joining event")
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to join event",
     }
   }
-
-  const existingParticipant = await db.query.eventParticipants.findFirst({
-    where: (ep, { and, eq }) =>
-      and(eq(ep.eventId, eventId), eq(ep.userId, session.user.id)),
-  })
-
-  if (existingParticipant) {
-    throw new Error("You are already a participant in this event")
-  }
-
-  await db.insert(eventParticipants).values({
-    eventId,
-    userId: session.user.id,
-    role: "participant",
-  })
-
-  return { success: true }
 }
 
 export async function generateEventInviteLink(eventId: string) {
@@ -966,14 +1046,25 @@ export async function getEventParticipants(eventId: string) {
         // Only include team if it belongs to this event
         // const team = teamMember?.team.eventId === eventId ? teamMember.team : null
 
+        // Get metadata (skillLevel)
+        const metadata = await db.query.playerMetadata.findFirst({
+          where: and(
+            eq(playerMetadata.userId, participant.userId),
+            eq(playerMetadata.eventId, eventId)
+          ),
+        })
+
         return {
           id: participant.userId,
-          runescapeName: user?.runescapeName ?? "",
+          runescapeName: metadata?.runescapeNameOverride ?? user?.runescapeName ?? "",
+          hasOverride: !!metadata?.runescapeNameOverride,
+          originalRunescapeName: user?.runescapeName ?? "",
           role: participant.role,
           teamId: t != null ? t.id : null,
           teamName: t != null ? t.name : null,
           buyIn: buyIn,
           totalDonations: totalDonations,
+          skillLevel: metadata?.skillLevel ?? null,
         }
       })
     )
@@ -1133,60 +1224,70 @@ export async function updateParticipantBuyIn(
   hasPaid: boolean
 ) {
   try {
-    // First, get the minimum buy-in for the event
-    const event = await db.query.events.findFirst({
-      where: eq(events.id, eventId),
-    })
+    const buyInAmount = await db.transaction(async (tx) => {
+      // First, get the minimum buy-in for the event
+      const event = await tx.query.events.findFirst({
+        where: eq(events.id, eventId),
+      })
 
-    if (!event) {
-      throw new Error("Event not found")
-    }
-
-    // Find the eventParticipant
-    const eventParticipant = await db.query.eventParticipants.findFirst({
-      where: and(
-        eq(eventParticipants.eventId, eventId),
-        eq(eventParticipants.userId, participantId)
-      ),
-    })
-
-    if (!eventParticipant) {
-      throw new Error("Participant not found for this event")
-    }
-
-    // Calculate buy-in amount: use minimum buy-in if paid, 0 if not paid
-    const buyInAmount = hasPaid ? event.minimumBuyIn : 0
-
-    // Check if a buy-in record already exists
-    const existingBuyIn = await db.query.eventBuyIns.findFirst({
-      where: eq(eventBuyIns.eventParticipantId, eventParticipant.id),
-    })
-
-    if (existingBuyIn) {
-      // Update existing record
-      await db
-        .update(eventBuyIns)
-        .set({
-          amount: buyInAmount,
-          updatedAt: sql`CURRENT_TIMESTAMP`,
-        })
-        .where(eq(eventBuyIns.id, existingBuyIn.id))
-    } else {
-      // Insert new record only if they're paying
-      if (hasPaid) {
-        await db.insert(eventBuyIns).values({
-          eventParticipantId: eventParticipant.id,
-          amount: buyInAmount,
-        })
+      if (!event) {
+        throw new Error("Event not found")
       }
-    }
+
+      // Find the eventParticipant
+      const eventParticipant = await tx.query.eventParticipants.findFirst({
+        where: and(
+          eq(eventParticipants.eventId, eventId),
+          eq(eventParticipants.userId, participantId)
+        ),
+      })
+
+      if (!eventParticipant) {
+        throw new Error("Participant not found for this event")
+      }
+
+      // Calculate buy-in amount: use minimum buy-in if paid, 0 if not paid
+      const amount = hasPaid ? event.minimumBuyIn : 0
+
+      // Check if a buy-in record already exists
+      const existingBuyIn = await tx.query.eventBuyIns.findFirst({
+        where: eq(eventBuyIns.eventParticipantId, eventParticipant.id),
+      })
+
+      if (existingBuyIn) {
+        // Update existing record
+        await tx
+          .update(eventBuyIns)
+          .set({
+            amount: amount,
+            updatedAt: sql`CURRENT_TIMESTAMP`,
+          })
+          .where(eq(eventBuyIns.id, existingBuyIn.id))
+      } else {
+        // Insert new record only if they're paying
+        if (hasPaid) {
+          await tx.insert(eventBuyIns).values({
+            eventParticipantId: eventParticipant.id,
+            amount: amount,
+          })
+        }
+      }
+      return amount
+    })
+
     revalidatePath(`/events/${eventId}`)
     revalidatePath(`/`)
 
     return { success: true, buyInAmount }
   } catch (error) {
     logger.error({ error }, "Error updating participant buy-in:", error)
-    throw error
+    return {
+      success: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to update participant buy-in",
+    }
   }
 }
 
@@ -1197,68 +1298,84 @@ export async function removeParticipantFromEvent(
 ) {
   const session = await getServerAuthSession()
   if (!session || !session.user) {
-    throw new Error("You must be logged in to remove participants")
+    return {
+      success: false,
+      error: "You must be logged in to remove participants",
+    }
   }
 
   // Check if the current user has admin or management permissions
   const userRole = await getUserRole(eventId)
   if (userRole !== "admin" && userRole !== "management") {
-    throw new Error("You don't have permission to remove participants")
+    return {
+      success: false,
+      error: "You don't have permission to remove participants",
+    }
   }
 
   try {
-    // Find the participant record
-    const participant = await db.query.eventParticipants.findFirst({
-      where: and(
-        eq(eventParticipants.eventId, eventId),
-        eq(eventParticipants.userId, userId)
-      ),
-    })
+    await db.transaction(async (tx) => {
+      // Find the participant record
+      const participant = await tx.query.eventParticipants.findFirst({
+        where: and(
+          eq(eventParticipants.eventId, eventId),
+          eq(eventParticipants.userId, userId)
+        ),
+      })
 
-    if (!participant) {
-      throw new Error("Participant not found")
-    }
-
-    // Check if trying to remove an admin (only admins can remove other admins)
-    if (participant.role === "admin" && userRole !== "admin") {
-      throw new Error("Only admins can remove other admins")
-    }
-
-    // Remove the participant from any teams they might be in
-    const teamMemberships = await db.query.teamMembers.findMany({
-      where: eq(teamMembers.userId, userId),
-      with: {
-        team: true,
-      },
-    })
-
-    // Only remove from teams in this event
-    for (const membership of teamMemberships) {
-      if (membership.team.eventId === eventId) {
-        await db.delete(teamMembers).where(eq(teamMembers.id, membership.id))
+      if (!participant) {
+        throw new Error("Participant not found")
       }
-    }
 
-    // Remove any buy-ins
-    await db
-      .delete(eventBuyIns)
-      .where(eq(eventBuyIns.eventParticipantId, participant.id))
+      // Check if trying to remove an admin (only admins can remove other admins)
+      if (participant.role === "admin" && userRole !== "admin") {
+        throw new Error("Only admins can remove other admins")
+      }
 
-    // Remove any donations
-    await db
-      .delete(eventDonations)
-      .where(eq(eventDonations.eventParticipantId, participant.id))
+      // Remove the participant from any teams they might be in
+      const teamMemberships = await tx.query.teamMembers.findMany({
+        where: eq(teamMembers.userId, userId),
+        with: {
+          team: true,
+        },
+      })
 
-    // Remove the participant from the event
-    await db
-      .delete(eventParticipants)
-      .where(eq(eventParticipants.id, participant.id))
+      const membershipsToDelete = teamMemberships
+        .filter((m) => m.team.eventId === eventId)
+        .map((m) => m.id)
+
+      // Only remove from teams in this event, using inArray to avoid N+1 query
+      if (membershipsToDelete.length > 0) {
+        await tx
+          .delete(teamMembers)
+          .where(inArray(teamMembers.id, membershipsToDelete))
+      }
+
+      // Remove any buy-ins
+      await tx
+        .delete(eventBuyIns)
+        .where(eq(eventBuyIns.eventParticipantId, participant.id))
+
+      // Remove any donations
+      await tx
+        .delete(eventDonations)
+        .where(eq(eventDonations.eventParticipantId, participant.id))
+
+      // Remove the participant from the event
+      await tx
+        .delete(eventParticipants)
+        .where(eq(eventParticipants.id, participant.id))
+    })
 
     revalidatePath(`/events/${eventId}/participants`)
     return { success: true }
   } catch (error) {
     logger.error({ error }, "Error removing participant:", error)
-    throw error
+    return {
+      success: false,
+      error:
+        error instanceof Error ? error.message : "Failed to remove participant",
+    }
   }
 }
 
@@ -2239,4 +2356,67 @@ export async function deleteEventRule(
     logger.error({ error }, "Error deleting event rule")
     return { success: false, error: "Failed to delete rule" }
   }
+}
+
+export async function getMiniBoardTiles(bingoId: string) {
+  const session = await getServerAuthSession()
+  if (!session) return []
+
+  const bingo = await db.query.bingos.findFirst({
+    where: eq(bingos.id, bingoId),
+    columns: { eventId: true, visible: true },
+  })
+
+  if (!bingo || !bingo.visible) return []
+
+  const userTeam = await db
+    .select({ teamId: teams.id })
+    .from(teamMembers)
+    .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+    .where(
+      and(
+        eq(teamMembers.userId, session.user.id),
+        eq(teams.eventId, bingo.eventId)
+      )
+    )
+    .limit(1)
+
+  const teamId = userTeam[0]?.teamId
+
+  const allTiles = await db.query.tiles.findMany({
+    where: eq(tiles.bingoId, bingoId),
+    columns: {
+      id: true,
+      index: true,
+      isHidden: true,
+      title: true,
+      headerImage: true,
+    },
+    orderBy: (tiles, { asc }) => [asc(tiles.index)],
+  })
+
+  if (!teamId) {
+    return allTiles.map((tile) => ({
+      ...tile,
+      isCompleted: false,
+    }))
+  }
+
+  const submissions = await db.query.teamTileSubmissions.findMany({
+    where: eq(teamTileSubmissions.teamId, teamId),
+    columns: {
+      tileId: true,
+      status: true,
+    },
+  })
+
+  const submissionMap = new Map(submissions.map((s) => [s.tileId, s.status]))
+
+  return allTiles.map((tile) => {
+    const status = submissionMap.get(tile.id) || "none"
+    return {
+      ...tile,
+      isCompleted: status === "completed",
+    }
+  })
 }

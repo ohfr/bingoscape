@@ -12,7 +12,7 @@ import {
   teams,
   type ShipRule,
 } from "@/server/db/schema"
-import { and, eq, ne } from "drizzle-orm"
+import { and, eq, ne, inArray } from "drizzle-orm"
 import { getServerAuthSession } from "@/server/auth"
 import { getUserRole } from "./events"
 import { indexToCoord } from "@/lib/ship-placement"
@@ -266,7 +266,43 @@ export async function getBattleshipHits(bingoId: string) {
 export async function getBattleshipSunkShipTileIds(
   bingoId: string,
   attackerTeamId: string
-): Promise<string[]> {
+): Promise<Set<string>> {
+  const session = await getServerAuthSession()
+  if (!session?.user?.id) return new Set<string>()
+
+  const bingo = await db.query.bingos.findFirst({
+    where: eq(bingos.id, bingoId),
+    columns: { eventId: true, bingoType: true },
+  })
+
+  if (!bingo || bingo.bingoType !== "battleship") return new Set<string>()
+
+  const teamCheck = await assertTeamBelongsToEvent(bingo.eventId, attackerTeamId)
+  if (!teamCheck.ok) return new Set<string>()
+
+  const role = await getUserRole(bingo.eventId)
+  const isAdminOrManagement = role === "admin" || role === "management"
+
+  if (!isAdminOrManagement) {
+    const event = await db.query.events.findFirst({
+      where: eq(events.id, bingo.eventId),
+      columns: { creatorId: true },
+    })
+
+    const isEventCreator = event?.creatorId === session.user.id
+    if (!isEventCreator) {
+      const membership = await db.query.teamMembers.findFirst({
+        where: and(
+          eq(teamMembers.teamId, attackerTeamId),
+          eq(teamMembers.userId, session.user.id)
+        ),
+        columns: { teamId: true },
+      })
+
+      if (!membership) return new Set<string>()
+    }
+  }
+
   const [ships, hits] = await Promise.all([
     db.query.battleshipShips.findMany({
       where: eq(battleshipShips.bingoId, bingoId),
@@ -300,8 +336,20 @@ async function isOpponentShipSunkByAttacker(
     return false
   }
 
-  const sunkTiles = await getBattleshipSunkShipTileIds(bingoId, attackerTeamId)
-  return ship.tiles.every((t) => sunkTiles.includes(t.tileId))
+  // Only check sunk state for this ship.
+  // (Avoid loading every ship and all hits for the whole board.)
+  const tileIds = ship.tiles.map((t) => t.tileId)
+  const hitTiles = await db.query.battleshipHits.findMany({
+    where: and(
+      eq(battleshipHits.bingoId, bingoId),
+      eq(battleshipHits.attackerTeamId, attackerTeamId),
+      inArray(battleshipHits.tileId, tileIds)
+    ),
+    columns: { tileId: true },
+  })
+
+  const hitTileIds = new Set(hitTiles.map((h) => h.tileId))
+  return ship.tiles.every((t) => hitTileIds.has(t.tileId))
 }
 
 export async function recordBattleshipHitOnApproval(
@@ -348,8 +396,21 @@ export async function recordBattleshipHitOnApproval(
       defenderTeamId: defender.defenderTeamId,
       teamTileSubmissionId,
     })
-  } catch {
-    // Unique constraint — hit already recorded for this team/tile
+  } catch (error) {
+    // Unique constraint — hit already recorded for this team/tile.
+    const e = error as { code?: string; message?: string } | undefined
+    const message = typeof e?.message === "string" ? e.message : ""
+    const isUnique =
+      e?.code === "23505" || /unique|duplicate/i.test(message)
+
+    if (isUnique) {
+      // Unique constraint — hit already recorded for this team/tile.
+      // Continue so we can still compute `shipSunk` for UI feedback.
+    } else {
+      logger.error({ error }, "Error recording battleship hit")
+      throw error
+    }
+
   }
 
   const shipSunk = await isOpponentShipSunkByAttacker(

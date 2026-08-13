@@ -1,24 +1,25 @@
-"use client";
+"use client"
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react"
 import {
   Command,
   CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
-} from "@/components/ui/command";
-import { Badge } from "@/components/ui/badge";
-import { Check, Clock, AlertTriangle } from "lucide-react";
-import type { Tile } from "@/app/actions/events";
-import { ScrollArea } from "@/components/ui/scroll-area";
+} from "@/components/ui/command"
+import { Badge } from "@/components/ui/badge"
+import { Check, Clock, AlertTriangle } from "lucide-react"
+
+import { ScrollArea } from "@/components/ui/scroll-area"
+import type { Tile } from "@/types/model"
 
 interface TileSelectionDropdownProps {
-  tiles: Tile[];
-  currentTeamId: string;
-  targetTeamId?: string; // NEW: Team to show status for when submitting on behalf
-  onTileSelect: (tile: Tile) => void;
-  unlockedTiers?: Set<number>;
+  tiles: Tile[]
+  currentTeamId: string
+  targetTeamId?: string // NEW: Team to show status for when submitting on behalf
+  onTileSelect: (tile: Tile) => void
+  unlockedTiers?: Set<number>
 }
 
 export function TileSelectionDropdown({
@@ -28,88 +29,88 @@ export function TileSelectionDropdown({
   onTileSelect,
   unlockedTiers,
 }: TileSelectionDropdownProps) {
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState("")
 
   // Get tile status for current team or target team
   const getTileStatus = useCallback(
-    (tile: Tile): "approved" | "pending" | "needs_review" | "not_started" => {
+    (tile: Tile): "completed" | "needs_attention" | "incomplete" | "not_started" => {
       // Use target team ID if provided, otherwise current team
-      const teamIdForStatus = targetTeamId ?? currentTeamId;
+      const teamIdForStatus = targetTeamId ?? currentTeamId
 
       const teamSubmission = tile.teamTileSubmissions?.find(
-        (sub) => sub.teamId === teamIdForStatus,
-      );
+        (sub) => sub.teamId === teamIdForStatus
+      )
 
-      if (!teamSubmission) return "not_started";
-      return teamSubmission.status;
+      if (!teamSubmission) return "not_started"
+      return teamSubmission.status
     },
-    [currentTeamId, targetTeamId],
-  );
+    [currentTeamId, targetTeamId]
+  )
 
   // Check if tile is locked (for progression boards)
   const isTileLocked = useCallback(
     (tile: Tile): boolean => {
-      if (!unlockedTiers) return false;
-      return tile.tier > 0 && !unlockedTiers.has(tile.tier);
+      if (!unlockedTiers) return false
+      return tile.tier > 0 && !unlockedTiers.has(tile.tier)
     },
-    [unlockedTiers],
-  );
+    [unlockedTiers]
+  )
 
   // Smart filtering: hide approved tiles and locked tiers by default
   const filteredTiles = useMemo(() => {
     return tiles.filter((tile) => {
       // Hide approved tiles
-      const status = getTileStatus(tile);
-      if (status === "approved") return false;
+      const status = getTileStatus(tile)
+      if (status === "completed") return false
 
       // Hide locked tier tiles
-      if (isTileLocked(tile)) return false;
+      if (isTileLocked(tile)) return false
 
       // Apply search filter
       if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase();
-        const titleMatch = tile.title?.toLowerCase().includes(query);
-        const descMatch = tile.description?.toLowerCase().includes(query);
-        return titleMatch || descMatch;
+        const query = searchQuery.toLowerCase()
+        const titleMatch = tile.title?.toLowerCase().includes(query)
+        const descMatch = tile.description?.toLowerCase().includes(query)
+        return titleMatch || descMatch
       }
 
-      return true;
-    });
-  }, [tiles, searchQuery, getTileStatus, isTileLocked]);
+      return true
+    })
+  }, [tiles, searchQuery, getTileStatus, isTileLocked])
 
   // Get status badge component
   const getStatusBadge = (status: string) => {
     switch (status) {
-      case "approved":
+      case "completed":
         return (
           <Badge
             variant="outline"
             className="border-green-200 bg-green-100 text-xs text-green-800"
           >
             <Check className="mr-1 h-3 w-3" />
-            Approved
+            Completed
           </Badge>
-        );
-      case "needs_review":
+        )
+      case "needs_attention":
         return (
           <Badge
             variant="outline"
             className="border-yellow-200 bg-yellow-100 text-xs text-yellow-800"
           >
             <AlertTriangle className="mr-1 h-3 w-3" />
-            Needs Review
+            Needs Attention
           </Badge>
-        );
-      case "pending":
+        )
+      case "incomplete":
         return (
           <Badge
             variant="outline"
             className="border-blue-200 bg-blue-100 text-xs text-blue-800"
           >
             <Clock className="mr-1 h-3 w-3" />
-            Pending
+            Incomplete
           </Badge>
-        );
+        )
       default:
         return (
           <Badge
@@ -118,9 +119,9 @@ export function TileSelectionDropdown({
           >
             Not Started
           </Badge>
-        );
+        )
     }
-  };
+  }
 
   return (
     <div className="w-full">
@@ -143,7 +144,7 @@ export function TileSelectionDropdown({
           </CommandEmpty>
           <CommandGroup heading={`Available Tiles (${filteredTiles.length})`}>
             {filteredTiles.map((tile) => {
-              const status = getTileStatus(tile);
+              const status = getTileStatus(tile)
 
               return (
                 <CommandItem
@@ -170,7 +171,7 @@ export function TileSelectionDropdown({
                     <div className="mt-2">{getStatusBadge(status)}</div>
                   </div>
                 </CommandItem>
-              );
+              )
             })}
           </CommandGroup>
         </ScrollArea>
@@ -187,5 +188,5 @@ export function TileSelectionDropdown({
         </div>
       )}
     </div>
-  );
+  )
 }

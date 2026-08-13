@@ -57,6 +57,7 @@ export function AddClanMembersDialog({
       setSelectedMembers(new Set())
       setSearchTerm("")
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, eventId])
 
   const loadMembers = async () => {
@@ -278,7 +279,7 @@ export function AddClanMembersDialog({
                     </div>
                     <Badge
                       variant={getRoleBadgeVariant(member.role)}
-                      className="flex flex-shrink-0 items-center gap-1"
+                      className="flex shrink-0 items-center gap-1"
                     >
                       {getRoleIcon(member.role)}
                       {member.role}

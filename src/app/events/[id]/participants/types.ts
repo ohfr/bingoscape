@@ -1,8 +1,9 @@
-import type { UUID } from "crypto"
 
 export interface Participant {
   id: string
   runescapeName: string
+  hasOverride?: boolean
+  originalRunescapeName?: string
   role: "admin" | "management" | "participant"
   teamId: string | null
   teamName: string | null
@@ -15,7 +16,13 @@ export interface Team {
   name: string
 }
 
-export type SortField = "name" | "role" | "team" | "buyIn" | "donations" | "status"
+export type SortField =
+  | "name"
+  | "role"
+  | "team"
+  | "buyIn"
+  | "donations"
+  | "status"
 export type SortDirection = "asc" | "desc"
 
 export interface EventPermissions {

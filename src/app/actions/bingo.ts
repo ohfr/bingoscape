@@ -6,6 +6,7 @@ import {
   bingos,
   goals,
   itemGoals,
+  metricGoals,
   teamGoalProgress,
   tiles,
   submissions,
@@ -28,7 +29,7 @@ import { revalidatePath } from "next/cache"
 import { nanoid } from "nanoid"
 import fs from "fs/promises"
 import path from "path"
-import type { Tile, TeamTileSubmission, Bingo } from "./events"
+import type { Tile, TeamTileSubmission, Bingo } from "@/types/model"
 import { getUserRole } from "./events"
 import { createNotification } from "./notifications"
 import { getServerAuthSession } from "@/server/auth"
@@ -40,9 +41,85 @@ import {
 import { discordWebhooks } from "@/server/db/schema"
 import { sql } from "drizzle-orm"
 import { logger } from "@/lib/logger"
-import { trackError, trackDbQuery } from "@/lib/metrics"
+import type { SelectableUser } from "@/types/model"
 
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads")
+
+// ---------------------------------------------------------------------------
+// Private auth-guard helpers (C2 fix)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies that the currently authenticated user holds the admin or management
+ * role for the event that owns the given bingo.
+ * Returns the eventId on success, or throws a descriptive error on failure.
+ */
+async function requireBingoAdmin(bingoId: string): Promise<string> {
+  const session = await getServerAuthSession()
+  if (!session?.user) throw new Error("Unauthorized")
+
+  const bingo = await db.query.bingos.findFirst({
+    where: eq(bingos.id, bingoId),
+    columns: { eventId: true },
+  })
+  if (!bingo) throw new Error("Bingo not found")
+
+  const role = await getUserRole(bingo.eventId)
+  if (role !== "admin" && role !== "management") {
+    throw new Error("Forbidden: admin or management role required")
+  }
+
+  return bingo.eventId
+}
+
+/**
+ * Same check as requireBingoAdmin but starting from a tileId.
+ */
+async function requireBingoAdminForTile(tileId: string): Promise<string> {
+  const session = await getServerAuthSession()
+  if (!session?.user) throw new Error("Unauthorized")
+
+  const tile = await db.query.tiles.findFirst({
+    where: eq(tiles.id, tileId),
+    columns: { bingoId: true },
+    with: { bingo: { columns: { eventId: true } } },
+  })
+  if (!tile) throw new Error("Tile not found")
+
+  const role = await getUserRole(tile.bingo.eventId)
+  if (role !== "admin" && role !== "management") {
+    throw new Error("Forbidden: admin or management role required")
+  }
+
+  return tile.bingo.eventId
+}
+
+/**
+ * Same check as requireBingoAdmin but starting from a goalId.
+ */
+async function requireBingoAdminForGoal(goalId: string): Promise<string> {
+  const session = await getServerAuthSession()
+  if (!session?.user) throw new Error("Unauthorized")
+
+  const goal = await db.query.goals.findFirst({
+    where: eq(goals.id, goalId),
+    columns: { tileId: true },
+    with: {
+      tile: {
+        columns: { bingoId: true },
+        with: { bingo: { columns: { eventId: true } } },
+      },
+    },
+  })
+  if (!goal) throw new Error("Goal not found")
+
+  const role = await getUserRole(goal.tile.bingo.eventId)
+  if (role !== "admin" && role !== "management") {
+    throw new Error("Forbidden: admin or management role required")
+  }
+
+  return goal.tile.bingo.eventId
+}
 
 interface AddRowOrColumnSuccessResult {
   success: true
@@ -68,14 +145,7 @@ async function ensureUploadDir() {
   }
 }
 
-// Type for selectable users in submission on-behalf-of dropdown
-export interface SelectableUser {
-  id: string
-  name: string | null
-  runescapeName: string | null
-  teamId?: string | null
-  teamName?: string | null
-}
+// Type for selectable users in submission on-behalf-of dropdown imported from model.ts
 
 /**
  * Get users that the current user can submit on behalf of.
@@ -209,10 +279,12 @@ export async function updateTile(
   updatedTile: Partial<typeof tiles.$inferInsert>
 ) {
   try {
+    await requireBingoAdminForTile(tileId)
     await db.update(tiles).set(updatedTile).where(eq(tiles.id, tileId))
+    logger.info({ tileId, action: "updateTile" }, "Tile updated successfully")
     return { success: true }
   } catch (error) {
-    logger.error({ error }, "Error updating tile")
+    logger.error({ error, tileId, action: "updateTile" }, "Error updating tile")
     return { success: false, error: "Failed to update tile" }
   }
 }
@@ -221,6 +293,11 @@ export async function reorderTiles(
   reorderedTiles: Array<{ id: string; index: number }>
 ) {
   try {
+    // Guard: verify caller is admin/management for the bingo that owns these tiles.
+    // We check the first tile; all tiles in a reorder call belong to the same bingo.
+    const firstTileId = reorderedTiles[0]?.id
+    if (!firstTileId) return { success: false, error: "No tiles provided" }
+    await requireBingoAdminForTile(firstTileId)
     await db.transaction(async (tx) => {
       for (const tile of reorderedTiles) {
         await tx
@@ -239,6 +316,19 @@ export async function reorderTiles(
 export async function createBingo(formData: FormData) {
   const eventId = formData.get("eventId") as UUID
   const title = formData.get("title") as string
+
+  // Auth guard: only event admin/management may create bingos.
+  {
+    const session = await getServerAuthSession()
+    if (!session?.user) return { success: false, error: "Unauthorized" }
+    const role = await getUserRole(eventId)
+    if (role !== "admin" && role !== "management") {
+      return {
+        success: false,
+        error: "Forbidden: admin or management role required",
+      }
+    }
+  }
   const description = formData.get("description") as string
   const rowsStr = formData.get("rows") as string
   const columnsStr = formData.get("columns") as string
@@ -253,7 +343,7 @@ export async function createBingo(formData: FormData) {
   logger.debug({ formData }, "Create bingo form data")
 
   if (!eventId || !title || !rowsStr || !columnsStr) {
-    throw new Error("Missing required fields")
+    return { success: false, error: "Missing required fields" }
   }
 
   const rows = Number.parseInt(rowsStr)
@@ -263,7 +353,7 @@ export async function createBingo(formData: FormData) {
     : 1
 
   if (isNaN(rows) || isNaN(columns) || rows < 1 || columns < 1) {
-    throw new Error("Invalid rows or columns")
+    return { success: false, error: "Invalid rows or columns" }
   }
 
   // Fetch the event to get its gameType
@@ -272,7 +362,7 @@ export async function createBingo(formData: FormData) {
   })
 
   if (!event) {
-    throw new Error("Event not found")
+    return { success: false, error: "Event not found" }
   }
 
   // Parse pattern bonuses
@@ -283,116 +373,138 @@ export async function createBingo(formData: FormData) {
   const completeBoardBonus =
     parseInt((formData.get("completeBoardBonus") as string) || "0") || 0
 
-  const newBingo = await db
-    .insert(bingos)
-    .values({
-      eventId,
-      title,
-      description: description || "",
-      rows,
-      codephrase,
-      columns,
-      bingoType,
-      tiersUnlockRequirement,
-      mainDiagonalBonusXP: rows === columns ? mainDiagonalBonus : 0,
-      antiDiagonalBonusXP: rows === columns ? antiDiagonalBonus : 0,
-      completeBoardBonusXP: bingoType === "standard" ? completeBoardBonus : 0,
-    })
-    .returning({ id: bingos.id })
+  const scheduledUnlockDateStr = formData.get("scheduledUnlockDate") as string
+  const scheduledUnlockDate = scheduledUnlockDateStr
+    ? new Date(scheduledUnlockDateStr)
+    : null
 
-  const bingoId = newBingo[0]!.id
+  try {
+    await db.transaction(async (tx) => {
+      const newBingo = await tx
+        .insert(bingos)
+        .values({
+          eventId,
+          title,
+          description: description || "",
+          rows,
+          codephrase,
+          columns,
+          bingoType,
+          tiersUnlockRequirement,
+          mainDiagonalBonusXP: rows === columns ? mainDiagonalBonus : 0,
+          antiDiagonalBonusXP: rows === columns ? antiDiagonalBonus : 0,
+          completeBoardBonusXP:
+            bingoType === "standard" ? completeBoardBonus : 0,
+          scheduledUnlockDate,
+          locked: true,
+          visible: false,
+        })
+        .returning({ id: bingos.id })
 
-  const tilesToInsert = []
-  for (let idx = 0; idx < rows * columns; idx++) {
-    tilesToInsert.push({
-      bingoId,
-      title: `Tile ${idx + 1}`,
-      headerImage: getRandomFrog(event.gameType),
-      description: `Tile ${idx + 1}`,
-      weight: 1,
-      isHidden: false,
-      index: idx,
-      tier: bingoType === "progression" ? Math.floor(idx / columns) : 0, // Assign tiers based on rows for progression
-    })
-  }
+      const bingoId = newBingo[0]!.id
 
-  await db.insert(tiles).values(tilesToInsert)
-
-  // Initialize pattern bonuses for standard bingos
-  if (bingoType === "standard") {
-    // Insert row bonuses
-    const rowBonusValues = []
-    for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-      const bonusXP =
-        parseInt((formData.get(`rowBonus-${rowIndex}`) as string) || "0") || 0
-      if (bonusXP > 0) {
-        rowBonusValues.push({
+      const tilesToInsert = []
+      for (let idx = 0; idx < rows * columns; idx++) {
+        tilesToInsert.push({
           bingoId,
-          rowIndex,
-          bonusXP,
+          title: `Tile ${idx + 1}`,
+          headerImage: getRandomFrog(event.gameType),
+          description: `Tile ${idx + 1}`,
+          weight: 1,
+          isHidden: false,
+          index: idx,
+          tier: bingoType === "progression" ? Math.floor(idx / columns) : 0,
         })
       }
-    }
-    if (rowBonusValues.length > 0) {
-      await db.insert(rowBonuses).values(rowBonusValues)
-    }
 
-    // Insert column bonuses
-    const columnBonusValues = []
-    for (let columnIndex = 0; columnIndex < columns; columnIndex++) {
-      const bonusXP =
-        parseInt(
-          (formData.get(`columnBonus-${columnIndex}`) as string) || "0"
-        ) || 0
-      if (bonusXP > 0) {
-        columnBonusValues.push({
-          bingoId,
-          columnIndex,
-          bonusXP,
-        })
+      await tx.insert(tiles).values(tilesToInsert)
+
+      if (bingoType === "standard") {
+        const rowBonusValues = []
+        for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
+          const bonusXP =
+            parseInt((formData.get(`rowBonus-${rowIndex}`) as string) || "0") ||
+            0
+          if (bonusXP > 0) {
+            rowBonusValues.push({ bingoId, rowIndex, bonusXP })
+          }
+        }
+        if (rowBonusValues.length > 0) {
+          await tx.insert(rowBonuses).values(rowBonusValues)
+        }
+
+        const columnBonusValues = []
+        for (let columnIndex = 0; columnIndex < columns; columnIndex++) {
+          const bonusXP =
+            parseInt(
+              (formData.get(`columnBonus-${columnIndex}`) as string) || "0"
+            ) || 0
+          if (bonusXP > 0) {
+            columnBonusValues.push({ bingoId, columnIndex, bonusXP })
+          }
+        }
+        if (columnBonusValues.length > 0) {
+          await tx.insert(columnBonuses).values(columnBonusValues)
+        }
       }
-    }
-    if (columnBonusValues.length > 0) {
-      await db.insert(columnBonuses).values(columnBonusValues)
-    }
-  }
 
-  // Initialize tier XP requirements for progression bingos
-  if (bingoType === "progression") {
-    await initializeTierXpRequirements(bingoId, tiersUnlockRequirement)
-  }
+      if (bingoType === "progression") {
+        const tierRequirements = []
+        for (let tier = 0; tier < rows - 1; tier++) {
+          tierRequirements.push({
+            bingoId,
+            tier,
+            xpRequired: tiersUnlockRequirement,
+          })
+        }
+        if (tierRequirements.length > 0) {
+          await tx.insert(tierXpRequirements).values(tierRequirements)
+        }
+      }
 
-  // Initialize ship rules for battleship bingos
-  if (bingoType === "battleship") {
-    const { parseShipRulesFromFormData, insertBingoShipRules } = await import(
-      "./battleship"
-    )
-    const shipRules = await parseShipRulesFromFormData(formData)
-    const rulesToInsert =
-      shipRules.length === 0
-        ? [
-            { length: 3, count: 2 },
-            { length: 2, count: 1 },
-          ]
-        : shipRules
-    await insertBingoShipRules(bingoId, rulesToInsert, { rows, columns })
-  }
+      if (bingoType === "battleship") {
+        const { parseShipRulesFromFormData, insertBingoShipRules } =
+          await import("./battleship")
+        const shipRules = await parseShipRulesFromFormData(formData)
+        const rulesToInsert =
+          shipRules.length === 0
+            ? [
+                { length: 3, count: 2 },
+                { length: 2, count: 1 },
+              ]
+            : shipRules
+        await insertBingoShipRules(bingoId, rulesToInsert, { rows, columns })
+      }
 
-  return { success: true }
+      logger.info(
+        {
+          eventId,
+          bingoId,
+          bingoType,
+          rows,
+          columns,
+          action: "createBingo",
+        },
+        "Bingo created successfully"
+      )
+    })
+
+    return { success: true }
+  } catch (error) {
+    logger.error({ error }, "Error creating bingo")
+    return { success: false, error: "Failed to create bingo" }
+  }
 }
 
 export async function deleteBingo(bingoId: string) {
   try {
+    await requireBingoAdmin(bingoId)
     await db.transaction(async (tx) => {
       // Delete all tiles associated with the bingo
-      const tilesDeleted = await tx
-        .delete(tiles)
-        .where(eq(tiles.bingoId, bingoId))
+      await tx.delete(tiles).where(eq(tiles.bingoId, bingoId))
 
       // Delete the bingo itself
-      const bingosDeleted = await tx
-        .delete(bingos)
-        .where(eq(bingos.id, bingoId))
+      await tx.delete(bingos).where(eq(bingos.id, bingoId))
       // console.table(tilesDeleted, bingosDeleted);
     })
 
@@ -408,6 +520,7 @@ export async function addGoal(
   goal: { description: string; targetValue: number }
 ) {
   try {
+    await requireBingoAdminForTile(tileId)
     const [newGoal] = await db
       .insert(goals)
       .values({
@@ -426,6 +539,7 @@ export async function addGoal(
 
 export async function deleteGoal(goalId: string) {
   try {
+    await requireBingoAdminForGoal(goalId)
     await db.delete(goals).where(eq(goals.id, goalId))
     return { success: true }
   } catch (error) {
@@ -445,6 +559,7 @@ export async function updateGoal(
   }
 ) {
   try {
+    await requireBingoAdminForGoal(goalId)
     // Validate inputs
     if (updates.targetValue !== undefined && updates.targetValue <= 0) {
       return { success: false, error: "Target value must be greater than 0" }
@@ -532,6 +647,87 @@ export async function createItemGoal(
   }
 }
 
+export async function createMetricGoal(
+  tileId: string,
+  metricType: string,
+  metricName: string,
+  targetValue: number,
+  description?: string
+) {
+  try {
+    const goalDescription = description || `${metricName} (${metricType})`
+
+    // Create the goal first
+    const [newGoal] = await db
+      .insert(goals)
+      .values({
+        tileId,
+        description: goalDescription,
+        targetValue,
+        goalType: "metric",
+      })
+      .returning()
+
+    if (!newGoal) {
+      return { success: false, error: "Failed to create goal" }
+    }
+
+    // Create the metric goal metadata
+    const [metricGoalData] = await db
+      .insert(metricGoals)
+      .values({
+        goalId: newGoal.id,
+        metricType,
+        metricName,
+      })
+      .returning()
+
+    return { success: true, goal: newGoal, metricGoal: metricGoalData }
+  } catch (error) {
+    logger.error({ error }, "Error creating metric goal")
+    return { success: false, error: "Failed to create metric goal" }
+  }
+}
+
+export async function updateMetricGoal(
+  goalId: string,
+  metricType: string,
+  metricName: string,
+  targetValue: number,
+  description?: string
+) {
+  try {
+    await requireBingoAdminForGoal(goalId)
+    const goalDescription = description || `${metricName} (${metricType})`
+
+    // Update the base goal
+    await db
+      .update(goals)
+      .set({
+        description: goalDescription,
+        targetValue,
+        updatedAt: new Date(),
+      })
+      .where(eq(goals.id, goalId))
+
+    // Update the metric goal metadata
+    await db
+      .update(metricGoals)
+      .set({
+        metricType,
+        metricName,
+        updatedAt: new Date(),
+      })
+      .where(eq(metricGoals.goalId, goalId))
+
+    revalidatePath("/")
+    return { success: true }
+  } catch (error) {
+    logger.error({ error }, "Error updating metric goal")
+    return { success: false, error: "Failed to update metric goal" }
+  }
+}
+
 /**
  * Get goal with item data if it's an item goal
  */
@@ -568,6 +764,7 @@ export async function updateItemGoal(
   targetValue?: number
 ) {
   try {
+    await requireBingoAdminForGoal(goalId)
     // Build goal update object
     const goalUpdate: Partial<typeof goals.$inferInsert> & { updatedAt: Date } =
       {
@@ -671,46 +868,7 @@ export async function getTileGoalsAndProgress(tileId: string) {
   return tileGoals
 }
 
-export interface GoalData {
-  id: string
-  description: string
-  createdAt: Date
-  updatedAt: Date
-  tileId: string
-  targetValue: number
-}
-
-export interface TileData {
-  id: string
-  title: string
-  description: string
-  createdAt: Date
-  updatedAt: Date
-  bingoId: string
-  headerImage: string | null
-  weight: number
-  index: number
-  isHidden: boolean
-  tier: number
-  goals: GoalData[]
-}
-
-export interface BingoData {
-  id: string
-  title: string
-  description: string | null
-  columns: number
-  createdAt: Date
-  updatedAt: Date
-  locked: boolean
-  eventId: string
-  rows: number
-  codephrase: string
-  visible: boolean
-  bingoType: "standard" | "progression" | "battleship"
-  tiersUnlockRequirement: number
-  tiles: TileData[]
-}
+// Types GoalData, TileData, BingoData are imported from @/types/model
 
 // Update the getAllSubmissionsForTeam function to include goal information
 export async function getAllSubmissionsForTeam(
@@ -746,7 +904,21 @@ export async function getAllSubmissionsForTeam(
           },
         },
         team: true,
-        tile: true,
+        tile: {
+          with: {
+            bingo: {
+              columns: {
+                id: true,
+                title: true,
+              },
+            },
+            goals: {
+              with: {
+                itemGoal: true,
+              }
+            }
+          }
+        }
       },
       where: and(
         eq(teamTileSubmissions.teamId, teamId),
@@ -917,13 +1089,13 @@ export async function submitImage(formData: FormData) {
         .values({
           tileId,
           teamId: effectiveTeamId,
-          status: "pending",
+          status: "incomplete",
         })
         .onConflictDoUpdate({
           target: [teamTileSubmissions.tileId, teamTileSubmissions.teamId],
           set: {
             updatedAt: new Date(),
-            status: "pending", // Reset status to pending when a new submission is made
+            status: sql`CASE WHEN ${teamTileSubmissions.status} = 'completed' THEN 'completed'::tile_completion_status ELSE 'incomplete'::tile_completion_status END`,
           },
         })
         .returning()
@@ -1035,9 +1207,25 @@ export async function submitImage(formData: FormData) {
     // Revalidate the bingo page
     revalidatePath("/bingo")
 
+    logger.info(
+      {
+        submissionId: newSubmission?.submission?.id,
+        tileId,
+        teamId: effectiveTeamId,
+        submitterId: session.user.id,
+        targetUserId: targetUser.id,
+        action: "submitImage",
+      },
+      "Image submitted successfully"
+    )
+
     return { success: true, submission: newSubmission.submission }
   } catch (error) {
-    logger.error({ error }, "Error submitting image")
+    const catchTileId = formData.get("tileId") as string | null
+    logger.error(
+      { error, tileId: catchTileId, action: "submitImage" },
+      "Error submitting image"
+    )
     return { success: false, error: (error as Error).message }
   }
 }
@@ -1053,6 +1241,23 @@ export async function updateSubmissionStatus(
     const session = await getServerAuthSession()
     if (!session) {
       throw new Error("Not authenticated")
+    }
+
+    // H4 fix: derive the event from the submission record itself, never trust
+    // a caller-supplied eventId.  Verify the caller is admin/management.
+    const submissionRecord = await db.query.submissions.findFirst({
+      where: eq(submissions.id, submissionId),
+      with: {
+        teamTileSubmission: {
+          with: { tile: { with: { bingo: { columns: { eventId: true } } } } },
+        },
+      },
+    })
+    if (!submissionRecord) throw new Error("Submission not found")
+    const eventId = submissionRecord.teamTileSubmission.tile.bingo.eventId
+    const callerRole = await getUserRole(eventId)
+    if (callerRole !== "admin" && callerRole !== "management") {
+      throw new Error("Forbidden: admin or management role required")
     }
 
     logger.info(
@@ -1075,11 +1280,22 @@ export async function updateSubmissionStatus(
 
     // Update submission value if provided
     if (submissionValue !== undefined) {
-      updateData.submissionValue = submissionValue
+      updateData.submissionValue = submissionValue ?? 1
     }
 
-    const [updatedSubmission] = await db
-      .update(submissions)
+    // Fetch the old submission before updating to get the correct oldGoalId
+    const oldSubmissionRecord = await db.query.submissions.findFirst({
+      where: eq(submissions.id, submissionId),
+      with: {
+        teamTileSubmission: true
+      }
+    })
+
+    if (!oldSubmissionRecord || !oldSubmissionRecord.teamTileSubmission) {
+      throw new Error("Associated team tile submission not found")
+    }
+
+    const [updatedSubmission] = await db.update(submissions)
       .set(updateData)
       .where(eq(submissions.id, submissionId))
       .returning()
@@ -1093,100 +1309,90 @@ export async function updateSubmissionStatus(
       await db
         .update(teamTileSubmissions)
         .set({
-          status: "needs_review",
+          status: "needs_attention",
           reviewedBy: session.user.id,
           updatedAt: new Date(),
         })
         .where(
           eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId)
         )
+    } else {
+      // Reconcile needs_attention status if parent was needs_attention
+      const teamSubmission = await db.query.teamTileSubmissions.findFirst({
+        where: eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId)
+      })
+      if (teamSubmission?.status === "needs_attention") {
+        const remainingNeedsReview = await db.query.submissions.findFirst({
+          where: and(
+            eq(submissions.teamTileSubmissionId, teamSubmission.id),
+            eq(submissions.status, "needs_review")
+          )
+        })
+        if (!remainingNeedsReview) {
+          // If no remaining submissions need review, revert tile to incomplete
+          await db.update(teamTileSubmissions)
+            .set({ status: "incomplete", updatedAt: new Date() })
+            .where(eq(teamTileSubmissions.id, teamSubmission.id))
+        }
+      }
+    }
+
+    // Goal-less tile auto-completion
+    if (newStatus === "approved") {
+      const goalsResult = await db.query.goals.findMany({
+        where: eq(goals.tileId, oldSubmissionRecord.teamTileSubmission.tileId)
+      });
+      
+      if (goalsResult.length === 0) {
+        await db.update(teamTileSubmissions)
+          .set({
+            status: "completed",
+            reviewedBy: session.user.id,
+            updatedAt: new Date(),
+          })
+          .where(eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId));
+      }
     }
 
     // If submission has a goal assignment, recalculate goal progress
+    const { recalculateGoalProgress } = await import("./goals")
+    const oldGoalId = oldSubmissionRecord.goalId
+    const teamId = oldSubmissionRecord.teamTileSubmission.teamId
+
+    if (oldGoalId && oldGoalId !== updatedSubmission.goalId) {
+      await recalculateGoalProgress(db, oldGoalId, teamId)
+    }
     if (updatedSubmission.goalId) {
-      // Get the team submission to find the team ID
-      const teamSubmission = await db.query.teamTileSubmissions.findFirst({
-        where: eq(
-          teamTileSubmissions.id,
-          updatedSubmission.teamTileSubmissionId
-        ),
-      })
-
-      if (teamSubmission) {
-        // Recalculate progress from ALL approved submissions for this goal and team
-        const approvedSubmissions = await db
-          .select({
-            submissionValue: submissions.submissionValue,
-          })
-          .from(submissions)
-          .innerJoin(
-            teamTileSubmissions,
-            eq(submissions.teamTileSubmissionId, teamTileSubmissions.id)
-          )
-          .where(
-            and(
-              eq(submissions.goalId, updatedSubmission.goalId),
-              eq(submissions.status, "approved"),
-              eq(teamTileSubmissions.teamId, teamSubmission.teamId)
-            )
-          )
-
-        const totalValue = approvedSubmissions.reduce(
-          (sum, s) => sum + (s.submissionValue || 0),
-          0
-        )
-
-        // Get current goal progress for this team
-        const currentProgress = await db.query.teamGoalProgress.findFirst({
-          where: and(
-            eq(teamGoalProgress.goalId, updatedSubmission.goalId),
-            eq(teamGoalProgress.teamId, teamSubmission.teamId)
-          ),
-        })
-
-        if (currentProgress) {
-          // Update existing progress
-          await db
-            .update(teamGoalProgress)
-            .set({
-              currentValue: totalValue,
-              updatedAt: new Date(),
-            })
-            .where(eq(teamGoalProgress.id, currentProgress.id))
-        } else if (totalValue > 0) {
-          // Create new progress entry only if there's actual progress
-          await db.insert(teamGoalProgress).values({
-            goalId: updatedSubmission.goalId,
-            teamId: teamSubmission.teamId,
-            currentValue: totalValue,
-          })
-        }
-
-        // Check if we need to auto-complete the tile
-        const goal = await db.query.goals.findFirst({
-          where: eq(goals.id, updatedSubmission.goalId),
-        })
-        if (goal) {
-          const { checkAndAutoCompleteTile } = await import("./tile-completion")
-          await checkAndAutoCompleteTile(goal.tileId, teamSubmission.teamId)
-        }
-      }
+      await recalculateGoalProgress(db, updatedSubmission.goalId, teamId)
     }
 
     // Revalidate the submissions page
     revalidatePath("/bingo")
 
+    logger.info(
+      {
+        submissionId,
+        newStatus,
+        reviewerId: session.user.id,
+        action: "updateSubmissionStatus",
+      },
+      "Submission status updated"
+    )
+
     return { success: true, submission: updatedSubmission }
   } catch (error) {
-    logger.error({ error }, "Error updating submission status")
-    return { success: false, error: "Failed to update submission status" }
+    logger.error(
+      { error, submissionId, action: "updateSubmissionStatus" },
+      "Error updating submission status"
+    )
+    return { success: false, error: error instanceof Error ? error.message : "Failed to update submission status" }
   }
 }
 
 // Keep the existing updateTeamTileSubmissionStatus function but remove any automatic propagation
 export async function updateTeamTileSubmissionStatus(
   teamTileSubmissionId: string,
-  newStatus: "approved" | "needs_review"
+  newStatus: "completed" | "needs_attention"
 ) {
   try {
     const session = await getServerAuthSession()
@@ -1208,17 +1414,40 @@ export async function updateTeamTileSubmissionStatus(
       throw new Error("Team tile submission not found")
     }
 
-    // If approving the whole tile, approve all individual submissions
-    if (newStatus === "approved") {
-      await db
-        .update(submissions)
-        .set({
-          status: "approved",
-          reviewedBy: session.user.id,
-          reviewedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(submissions.teamTileSubmissionId, teamTileSubmissionId))
+    // If approving the whole tile, approve all pending individual submissions
+    if (newStatus === "completed") {
+      const pendingSubmissions = await db.query.submissions.findMany({
+        where: and(
+          eq(submissions.teamTileSubmissionId, teamTileSubmissionId),
+          eq(submissions.status, "pending")
+        )
+      })
+
+      if (pendingSubmissions.length > 0) {
+        await db
+          .update(submissions)
+          .set({
+            status: "approved",
+            reviewedBy: session.user.id,
+            reviewedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(submissions.teamTileSubmissionId, teamTileSubmissionId),
+              eq(submissions.status, "pending")
+            )
+          )
+
+        // Recalculate goal progress for updated submissions
+        const { recalculateGoalProgress } = await import("./goals")
+        const teamId = updatedTeamTileSubmission.teamId
+        for (const sub of pendingSubmissions) {
+          if (sub.goalId) {
+            await recalculateGoalProgress(db, sub.goalId, teamId)
+          }
+        }
+      }
 
       // Check for tier unlock in progression bingo
       const tile = await db.query.tiles.findFirst({
@@ -1264,9 +1493,22 @@ export async function updateTeamTileSubmissionStatus(
     // Revalidate the submissions page
     revalidatePath("/bingo")
 
+    logger.info(
+      {
+        teamTileSubmissionId,
+        newStatus,
+        reviewerId: session.user.id,
+        action: "updateTeamTileSubmissionStatus",
+      },
+      "Team tile submission status updated"
+    )
+
     return { success: true, teamTileSubmission: updatedTeamTileSubmission }
   } catch (error) {
-    logger.error({ error }, "Error updating team tile submission status")
+    logger.error(
+      { error, teamTileSubmissionId, action: "updateTeamTileSubmissionStatus" },
+      "Error updating team tile submission status"
+    )
     return {
       success: false,
       error: "Failed to update team tile submission status",
@@ -1286,6 +1528,22 @@ export async function updateSubmissionStatusWithComment(
     const session = await getServerAuthSession()
     if (!session) {
       throw new Error("Not authenticated")
+    }
+
+    // H4 fix: derive the event from the submission record itself, verify role.
+    const submissionRecord = await db.query.submissions.findFirst({
+      where: eq(submissions.id, submissionId),
+      with: {
+        teamTileSubmission: {
+          with: { tile: { with: { bingo: { columns: { eventId: true } } } } },
+        },
+      },
+    })
+    if (!submissionRecord) throw new Error("Submission not found")
+    const eventId = submissionRecord.teamTileSubmission.tile.bingo.eventId
+    const callerRole = await getUserRole(eventId)
+    if (callerRole !== "admin" && callerRole !== "management") {
+      throw new Error("Forbidden: admin or management role required")
     }
 
     logger.info(
@@ -1336,93 +1594,83 @@ export async function updateSubmissionStatusWithComment(
         await tx
           .update(teamTileSubmissions)
           .set({
-            status: "needs_review",
+            status: "needs_attention",
+            reviewedBy: session.user.id,
             updatedAt: new Date(),
           })
           .where(
             eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId)
           )
+      } else {
+        // Reconcile needs_attention status if parent was needs_attention
+        const teamSubmission = await tx.query.teamTileSubmissions.findFirst({
+          where: eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId)
+        })
+        if (teamSubmission?.status === "needs_attention") {
+          const remainingNeedsReview = await tx.query.submissions.findFirst({
+            where: and(
+              eq(submissions.teamTileSubmissionId, teamSubmission.id),
+              eq(submissions.status, "needs_review")
+            )
+          })
+          if (!remainingNeedsReview) {
+            // If no remaining submissions need review, revert tile to incomplete
+            await tx.update(teamTileSubmissions)
+              .set({ status: "incomplete", updatedAt: new Date() })
+              .where(eq(teamTileSubmissions.id, teamSubmission.id))
+          }
+        }
+      }
+
+      // Goal-less tile auto-completion
+      if (newStatus === "approved") {
+        const goalsResult = await tx.query.goals.findMany({
+          where: eq(goals.tileId, submissionRecord.teamTileSubmission.tileId)
+        });
+        
+        if (goalsResult.length === 0) {
+          await tx.update(teamTileSubmissions)
+            .set({
+              status: "completed",
+              reviewedBy: session.user.id,
+              updatedAt: new Date(),
+            })
+            .where(eq(teamTileSubmissions.id, updatedSubmission.teamTileSubmissionId));
+        }
       }
 
       // If submission has a goal assignment, recalculate goal progress
+      const { recalculateGoalProgress } = await import("./goals")
+      const oldGoalId = submissionRecord.goalId
+      const teamId = submissionRecord.teamTileSubmission.teamId
+
+      if (oldGoalId && oldGoalId !== updatedSubmission.goalId) {
+        await recalculateGoalProgress(tx, oldGoalId, teamId)
+      }
       if (updatedSubmission.goalId) {
-        // Get the team submission to find the team ID
-        const teamSubmission = await tx.query.teamTileSubmissions.findFirst({
-          where: eq(
-            teamTileSubmissions.id,
-            updatedSubmission.teamTileSubmissionId
-          ),
-        })
-
-        if (teamSubmission) {
-          // Recalculate progress from ALL approved submissions for this goal and team
-          const approvedSubmissions = await tx
-            .select({
-              submissionValue: submissions.submissionValue,
-            })
-            .from(submissions)
-            .innerJoin(
-              teamTileSubmissions,
-              eq(submissions.teamTileSubmissionId, teamTileSubmissions.id)
-            )
-            .where(
-              and(
-                eq(submissions.goalId, updatedSubmission.goalId),
-                eq(submissions.status, "approved"),
-                eq(teamTileSubmissions.teamId, teamSubmission.teamId)
-              )
-            )
-
-          const totalValue = approvedSubmissions.reduce(
-            (sum, s) => sum + (s.submissionValue || 0),
-            0
-          )
-
-          // Get current goal progress for this team
-          const currentProgress = await tx.query.teamGoalProgress.findFirst({
-            where: and(
-              eq(teamGoalProgress.goalId, updatedSubmission.goalId),
-              eq(teamGoalProgress.teamId, teamSubmission.teamId)
-            ),
-          })
-
-          if (currentProgress) {
-            // Update existing progress
-            await tx
-              .update(teamGoalProgress)
-              .set({
-                currentValue: totalValue,
-                updatedAt: new Date(),
-              })
-              .where(eq(teamGoalProgress.id, currentProgress.id))
-          } else if (totalValue > 0) {
-            // Create new progress entry only if there's actual progress
-            await tx.insert(teamGoalProgress).values({
-              goalId: updatedSubmission.goalId,
-              teamId: teamSubmission.teamId,
-              currentValue: totalValue,
-            })
-          }
-
-          // Check if we need to auto-complete the tile
-          const goal = await tx.query.goals.findFirst({
-            where: eq(goals.id, updatedSubmission.goalId),
-          })
-          if (goal) {
-            const { checkAndAutoCompleteTile } =
-              await import("./tile-completion")
-            await checkAndAutoCompleteTile(goal.tileId, teamSubmission.teamId)
-          }
-        }
+        await recalculateGoalProgress(tx, updatedSubmission.goalId, teamId)
       }
 
       // Revalidate the submissions page
       revalidatePath("/bingo")
 
+      logger.info(
+        {
+          submissionId,
+          newStatus,
+          reviewerId: session.user.id,
+          action: "updateSubmissionStatusWithComment",
+        },
+        "Submission status with comment updated"
+      )
+
       return { success: true, submission: updatedSubmission }
     })
   } catch (error) {
-    logger.error({ error }, "Error updating submission status with comment")
+    logger.error(
+      { error, submissionId, action: "updateSubmissionStatusWithComment" },
+      "Error updating submission status with comment"
+    )
     return { success: false, error: "Failed to update submission status" }
   }
 }
@@ -1430,12 +1678,13 @@ export async function updateSubmissionStatusWithComment(
 export async function deleteSubmission(submissionId: string) {
   try {
     return await db.transaction(async (tx) => {
-      // First, get the submission to find the associated image
+      // First, get the submission to find the associated image and goal
       const [submission] = await tx
         .select({
           id: submissions.id,
           imageId: submissions.imageId,
           teamTileSubmissionId: submissions.teamTileSubmissionId,
+          goalId: submissions.goalId,
         })
         .from(submissions)
         .where(eq(submissions.id, submissionId))
@@ -1443,6 +1692,11 @@ export async function deleteSubmission(submissionId: string) {
       if (!submission) {
         throw new Error("Submission not found")
       }
+
+      // Fetch team submission to get the teamId for progress recalculation
+      const teamSubmission = await tx.query.teamTileSubmissions.findFirst({
+        where: eq(teamTileSubmissions.id, submission.teamTileSubmissionId),
+      })
 
       // Get the image path to delete the file
       const [imageRecord] = await tx
@@ -1473,8 +1727,28 @@ export async function deleteSubmission(submissionId: string) {
         await tx.delete(images).where(eq(images.id, submission.imageId))
       }
 
-      // Note: We no longer automatically update the team tile submission status
-      // when individual submissions are deleted - they remain independent
+      // Recalculate goal progress if it had a goal
+      if (submission.goalId && teamSubmission?.teamId) {
+        const { recalculateGoalProgress } = await import("./goals")
+        await recalculateGoalProgress(tx, submission.goalId, teamSubmission.teamId)
+      }
+
+      // Reconcile needs_attention status if parent was needs_attention
+      if (teamSubmission?.status === "needs_attention") {
+        const remainingNeedsReview = await tx.query.submissions.findFirst({
+          where: and(
+            eq(submissions.teamTileSubmissionId, submission.teamTileSubmissionId),
+            eq(submissions.status, "needs_review")
+          )
+        })
+        
+        if (!remainingNeedsReview) {
+          // If no remaining submissions need review, revert tile to incomplete
+          await tx.update(teamTileSubmissions)
+            .set({ status: "incomplete", updatedAt: new Date() })
+            .where(eq(teamTileSubmissions.id, submission.teamTileSubmissionId))
+        }
+      }
 
       return { success: true }
     })
@@ -1489,6 +1763,7 @@ export async function addRowOrColumn(
   type: "row" | "column"
 ): Promise<AddRowOrColumnResult> {
   try {
+    await requireBingoAdmin(bingoId)
     return await db.transaction(async (tx) => {
       const [bingo] = await tx
         .select()
@@ -1550,6 +1825,7 @@ export async function addRowOrColumn(
 
 export async function deleteTile(tileId: string, bingoId: string) {
   try {
+    await requireBingoAdmin(bingoId)
     await db.transaction(async (tx) => {
       // Delete the tile
       await tx.delete(tiles).where(eq(tiles.id, tileId))
@@ -1570,10 +1846,7 @@ export async function deleteTile(tileId: string, bingoId: string) {
       }
 
       // Update bingo dimensions
-      const [bingo] = await tx
-        .select()
-        .from(bingos)
-        .where(eq(bingos.id, bingoId))
+      await tx.select().from(bingos).where(eq(bingos.id, bingoId))
 
       const newTotalTiles = remainingTiles.length
       const newRows = Math.floor(Math.sqrt(newTotalTiles))
@@ -1594,6 +1867,7 @@ export async function deleteTile(tileId: string, bingoId: string) {
 
 export async function addTile(bingoId: string): Promise<AddRowOrColumnResult> {
   try {
+    await requireBingoAdmin(bingoId)
     return await db.transaction(async (tx) => {
       const [bingo] = await tx
         .select()
@@ -1604,7 +1878,7 @@ export async function addTile(bingoId: string): Promise<AddRowOrColumnResult> {
       const totalTiles = bingo.rows * bingo.columns + 1
 
       // Create new tile
-      const [newTile] = await tx
+      await tx
         .insert(tiles)
         .values({
           bingoId,
@@ -1647,6 +1921,7 @@ export async function deleteRowOrColumn(
   type: "row" | "column"
 ): Promise<AddRowOrColumnResult> {
   try {
+    await requireBingoAdmin(bingoId)
     return await db.transaction(async (tx) => {
       const [bingo] = await tx
         .select()
@@ -1748,6 +2023,7 @@ export async function updateBingo(
   data: UpdateBingoDataWithBonuses
 ) {
   try {
+    await requireBingoAdmin(bingoId)
     await db.transaction(async (tx) => {
       const updateData: any = {
         title: data.title,
@@ -2026,7 +2302,7 @@ export async function checkAndUnlockNextTier(teamId: string, bingoId: string) {
       )
 
     const completedTilesXP = currentTierTiles
-      .filter((tile) => tile.teamTileSubmissions?.status === "approved")
+      .filter((tile) => tile.teamTileSubmissions?.status === "completed")
       .reduce((totalXP, tile) => totalXP + tile.weight, 0)
 
     // Get XP requirement for current tier to unlock next tier
@@ -2115,6 +2391,7 @@ export async function getProgressionBingoTiles(
 
 export async function updateTileTier(tileId: string, newTier: number) {
   try {
+    await requireBingoAdminForTile(tileId)
     await db
       .update(tiles)
       .set({ tier: newTier, updatedAt: new Date() })
@@ -2146,6 +2423,7 @@ export async function setTierXpRequirement(
   xpRequired: number
 ) {
   try {
+    await requireBingoAdmin(bingoId)
     // Try to update existing record
     const existingReq = await db.query.tierXpRequirements.findFirst({
       where: and(
@@ -2179,6 +2457,7 @@ export async function initializeTierXpRequirements(
   defaultXpRequired: number = 5
 ) {
   try {
+    await requireBingoAdmin(bingoId)
     // Get all unique tiers for this bingo
     const tierResults = await db
       .selectDistinct({ tier: tiles.tier })
@@ -2206,6 +2485,7 @@ export async function initializeTierXpRequirements(
 
 export async function createNewTier(bingoId: string) {
   try {
+    await requireBingoAdmin(bingoId)
     return await db.transaction(async (tx) => {
       // Get the highest tier number for this bingo
       const maxTierResult = await tx
@@ -2271,6 +2551,7 @@ export async function createNewTier(bingoId: string) {
 
 export async function deleteTier(bingoId: string, tierToDelete: number) {
   try {
+    await requireBingoAdmin(bingoId)
     return await db.transaction(async (tx) => {
       // First, delete all tiles in the specified tier
       const deletedTiles = await tx

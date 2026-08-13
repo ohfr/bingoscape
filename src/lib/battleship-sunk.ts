@@ -14,7 +14,7 @@ export function getSunkShipTileIds(
   ships: BattleshipShipTiles[],
   hits: BattleshipHitRecord[],
   attackerTeamId: string
-): string[] {
+): Set<string> {
   const hitTileIds = new Set(
     hits
       .filter((h) => h.attackerTeamId === attackerTeamId)
@@ -33,5 +33,5 @@ export function getSunkShipTileIds(
     }
   }
 
-  return [...sunkTileIds]
+  return sunkTileIds
 }

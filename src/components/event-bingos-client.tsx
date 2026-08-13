@@ -1,7 +1,7 @@
 /* eslint-disable */
 "use client"
 
-import { useState } from "react"
+import { useState, useCallback, useMemo } from "react"
 import {
   Card,
   CardContent,
@@ -18,10 +18,19 @@ import { TeamSelector } from "@/components/team-selector"
 import { QuickSubmissionButton } from "@/components/quick-submission-button"
 import { QuickSubmissionModal } from "@/components/quick-submission-modal"
 import Link from "next/link"
-import { ListFilter, ChevronLeft, ChevronRight, Edit } from "lucide-react"
+import { TrackerSettingsModal } from "@/components/tracker-settings-modal"
 import { BattleshipPlaceShipsButton } from "@/components/battleship-place-ships-button"
+import {
+  ListFilter,
+  ChevronLeft,
+  ChevronRight,
+  Edit,
+  Link as LinkIcon,
+  Lock,
+} from "lucide-react"
 import type { UUID } from "crypto"
 import { useRouter } from "next/navigation"
+import { EventTimeDisplay } from "./event-time-display"
 
 interface EventBingosClientProps {
   event: any
@@ -48,6 +57,8 @@ export function EventBingosClient({
   const [editBingoModalOpen, setEditBingoModalOpen] = useState(false)
   const [quickSubmissionModalOpen, setQuickSubmissionModalOpen] =
     useState(false)
+  const [trackerSettingsModalOpen, setTrackerSettingsModalOpen] =
+    useState(false)
 
   // Determine which team's data to show
   const effectiveTeamId = isAdminOrManagement ? selectedTeamId : currentTeam?.id
@@ -56,43 +67,51 @@ export function EventBingosClient({
   // Filter bingos based on user role and visibility
   const visibleBingos =
     event.bingos?.filter(
-      (bingo: any) => isAdminOrManagement || bingo.visible === true
+      (bingo: any) =>
+        isAdminOrManagement || bingo.visible === true || bingo.locked === true
     ) ?? []
 
   // Get current bingo based on index
   const currentBingo = visibleBingos[currentBingoIndex]
 
   // Calculate completion statistics for each bingo
-  const getBingoStats = (bingo: any) => {
-    if (!bingo?.tiles || !effectiveTeamId) {
-      return {
+  const getBingoStats = useCallback(
+    (bingo: any) => {
+      if (!bingo?.tiles || !effectiveTeamId) {
+        return {
+          completed: 0,
+          pending: 0,
+          needsReview: 0,
+          total: bingo?.tiles?.length || 0,
+        }
+      }
+
+      const stats = {
         completed: 0,
         pending: 0,
         needsReview: 0,
-        total: bingo?.tiles?.length || 0,
+        total: bingo.tiles.length,
       }
-    }
 
-    const stats = {
-      completed: 0,
-      pending: 0,
-      needsReview: 0,
-      total: bingo.tiles.length,
-    }
+      bingo.tiles.forEach((tile: any) => {
+        const teamSubmission = tile.teamTileSubmissions?.find(
+          (tts: any) => tts.teamId === effectiveTeamId
+        )
+        if (teamSubmission) {
+          if (teamSubmission.status === "completed") stats.completed++
+          else if (teamSubmission.status === "pending") stats.pending++
+          else if (teamSubmission.status === "needs_review") stats.needsReview++
+        }
+      })
 
-    bingo.tiles.forEach((tile: any) => {
-      const teamSubmission = tile.teamTileSubmissions?.find(
-        (tts: any) => tts.teamId === effectiveTeamId
-      )
-      if (teamSubmission) {
-        if (teamSubmission.status === "approved") stats.completed++
-        else if (teamSubmission.status === "pending") stats.pending++
-        else if (teamSubmission.status === "needs_review") stats.needsReview++
-      }
-    })
+      return stats
+    },
+    [effectiveTeamId]
+  )
 
-    return stats
-  }
+  const currentBingoStats = useMemo(() => {
+    return currentBingo ? getBingoStats(currentBingo) : null
+  }, [currentBingo, getBingoStats])
 
   const nextBingo = () => {
     if (visibleBingos.length > 1) {
@@ -108,41 +127,17 @@ export function EventBingosClient({
     }
   }
 
+  const isUpcoming =
+    currentBingo && currentBingo.locked && !currentBingo.visible
+  const unlockDate = currentBingo
+    ? currentBingo.scheduledUnlockDate
+      ? new Date(currentBingo.scheduledUnlockDate)
+      : new Date(event.startDate)
+    : null
+
   return (
     <>
-      <div className="mb-6 mt-6 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
-        <div className="flex flex-wrap items-center gap-4">
-          <div>
-            <h2 className="text-2xl font-bold">Boards</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {visibleBingos.length} board
-              {visibleBingos.length !== 1 ? "s" : ""} available
-            </p>
-          </div>
-          {visibleBingos.length > 1 && (
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={prevBingo}
-                disabled={visibleBingos.length <= 1}
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                {currentBingoIndex + 1} of {visibleBingos.length}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={nextBingo}
-                disabled={visibleBingos.length <= 1}
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
-        </div>
+      <div className="mb-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
         <div className="flex flex-wrap items-center gap-2">
           {/* Team selector for admins/management */}
           {isAdminOrManagement && event.teams && event.teams.length > 0 && (
@@ -155,6 +150,35 @@ export function EventBingosClient({
             />
           )}
         </div>
+        
+        {visibleBingos.length > 1 && (
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="text-sm font-medium text-muted-foreground">
+              {visibleBingos.length} board{visibleBingos.length !== 1 ? "s" : ""} available
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={prevBingo}
+                disabled={visibleBingos.length <= 1}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="text-sm font-medium text-muted-foreground min-w-[3rem] text-center">
+                {currentBingoIndex + 1} / {visibleBingos.length}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={nextBingo}
+                disabled={visibleBingos.length <= 1}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {visibleBingos.length === 0 ? (
@@ -183,17 +207,17 @@ export function EventBingosClient({
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-muted-foreground">
                       {Math.round(
-                        (getBingoStats(currentBingo).completed /
-                          getBingoStats(currentBingo).total) *
+                        (currentBingoStats!.completed /
+                          currentBingoStats!.total) *
                           100
                       ) || 0}
                       %
                     </span>
                     <div className="h-2 w-16 overflow-hidden rounded-full bg-muted">
                       <div
-                        className="h-full bg-gradient-to-r from-green-500 to-green-600 transition-all duration-300"
+                        className="h-full bg-linear-to-r from-green-500 to-green-600 transition-all duration-300"
                         style={{
-                          width: `${Math.round((getBingoStats(currentBingo).completed / getBingoStats(currentBingo).total) * 100) || 0}%`,
+                          width: `${Math.round((currentBingoStats!.completed / currentBingoStats!.total) * 100) || 0}%`,
                         }}
                       />
                     </div>
@@ -210,32 +234,32 @@ export function EventBingosClient({
                     <div className="flex items-center gap-1">
                       <div className="h-2 w-2 rounded-full bg-green-500"></div>
                       <span className="font-medium text-green-600 dark:text-green-400">
-                        {getBingoStats(currentBingo).completed} completed
+                        {currentBingoStats!.completed} completed
                       </span>
                     </div>
-                    {getBingoStats(currentBingo).pending > 0 && (
+                    {currentBingoStats!.pending > 0 && (
                       <div className="flex items-center gap-1">
                         <div className="h-2 w-2 rounded-full bg-blue-500"></div>
                         <span className="font-medium text-blue-600 dark:text-blue-400">
-                          {getBingoStats(currentBingo).pending} pending
+                          {currentBingoStats!.pending} pending
                         </span>
                       </div>
                     )}
-                    {getBingoStats(currentBingo).needsReview > 0 && (
+                    {currentBingoStats!.needsReview > 0 && (
                       <div className="flex items-center gap-1">
                         <div className="h-2 w-2 rounded-full bg-yellow-500"></div>
                         <span className="font-medium text-yellow-600 dark:text-yellow-400">
-                          {getBingoStats(currentBingo).needsReview} review
+                          {currentBingoStats!.needsReview} review
                         </span>
                       </div>
                     )}
                     <div className="flex items-center gap-1">
                       <div className="h-2 w-2 rounded-full bg-muted-foreground"></div>
                       <span className="font-medium text-muted-foreground">
-                        {getBingoStats(currentBingo).total -
-                          getBingoStats(currentBingo).completed -
-                          getBingoStats(currentBingo).pending -
-                          getBingoStats(currentBingo).needsReview}{" "}
+                        {currentBingoStats!.total -
+                          currentBingoStats!.completed -
+                          currentBingoStats!.pending -
+                          currentBingoStats!.needsReview}{" "}
                         remaining
                       </span>
                     </div>
@@ -253,6 +277,14 @@ export function EventBingosClient({
                         onClick={() => setEditBingoModalOpen(true)}
                       >
                         <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Tracker Settings"
+                        onClick={() => setTrackerSettingsModalOpen(true)}
+                      >
+                        <LinkIcon className="h-4 w-4" />
                       </Button>
                       <DeleteBingoButton bingoId={currentBingo.id as UUID} />
                     </>
@@ -273,22 +305,50 @@ export function EventBingosClient({
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-4">
-            <div className="relative rounded-lg border border-muted/40 bg-muted/20 p-2">
-              <BingoGrid
-                key={currentBingo.id} // Add key to force re-render when bingo changes
-                bingo={currentBingo}
-                currentTeamId={effectiveTeamId}
-                teams={event.teams ?? []}
-                gameType={event.gameType || "osrs"}
-                highlightedTiles={[]}
-                isLayoutLocked={true}
-                userRole={userRole}
-                eventStartDate={event.startDate}
-                eventEndDate={event.endDate}
-                eventCreatorId={event.creatorId}
-              />
-            </div>
+          <CardContent className="relative p-4">
+            {isUpcoming && !isAdminOrManagement ? (
+              <div className="flex min-h-[300px] flex-col items-center justify-center rounded-lg border border-muted/40 bg-muted/20 p-12 text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+                  <Lock className="h-8 w-8 text-muted-foreground" />
+                </div>
+                <h3 className="mb-2 text-xl font-bold">Board Locked</h3>
+                <p className="mb-4 max-w-md text-muted-foreground">
+                  This bingo board is currently locked and will become available
+                  at:
+                </p>
+                {unlockDate && (
+                  <div className="rounded-md border bg-background px-4 py-3 text-lg font-medium">
+                    <EventTimeDisplay
+                      date={unlockDate}
+                      label="Unlocks"
+                      eventTz={event.timezone || "UTC"}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="relative rounded-lg border border-muted/40 bg-muted/20 p-2">
+                {isUpcoming && isAdminOrManagement && (
+                  <div className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-full border border-white/20 bg-black/80 px-3 py-1.5 text-xs font-bold text-white backdrop-blur-xs">
+                    <Lock className="h-3 w-3" />
+                    Upcoming (Locked)
+                  </div>
+                )}
+                <BingoGrid
+                  key={currentBingo.id} // Add key to force re-render when bingo changes
+                  bingo={currentBingo}
+                  currentTeamId={effectiveTeamId}
+                  teams={event.teams ?? []}
+                  gameType={event.gameType || "osrs"}
+                  highlightedTiles={[]}
+                  isLayoutLocked={true}
+                  userRole={userRole}
+                  eventStartDate={event.startDate}
+                  eventEndDate={event.endDate}
+                  eventCreatorId={event.creatorId}
+                />
+              </div>
+            )}
           </CardContent>
           <CardFooter className="flex flex-col justify-between gap-3 pt-4 sm:flex-row">
             <div className="flex w-full flex-wrap gap-2 sm:w-auto">
@@ -349,6 +409,17 @@ export function EventBingosClient({
             // Refresh the page to show updated submissions
             router.refresh()
           }}
+        />
+      )}
+
+      {/* Tracker Settings Modal */}
+      {isAdminOrManagement && currentBingo && (
+        <TrackerSettingsModal
+          bingoId={currentBingo.id}
+          womCompetitionId={currentBingo.womCompetitionId}
+          womVerificationCode={currentBingo.womVerificationCode}
+          isOpen={trackerSettingsModalOpen}
+          onClose={() => setTrackerSettingsModalOpen(false)}
         />
       )}
     </>

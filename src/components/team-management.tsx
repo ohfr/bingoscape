@@ -15,6 +15,7 @@ import {
   getEventParticipants,
   updateTeamMember,
   updateTeamName,
+  assignParticipantToTeam,
 } from "@/app/actions/team"
 import { toast } from "@/hooks/use-toast"
 import {
@@ -22,7 +23,6 @@ import {
   Trash2,
   UserPlus,
   UserMinus,
-  Shield,
   ShieldOff,
   Users,
   Shuffle,
@@ -78,7 +78,10 @@ type TeamMember = {
     name: string | null
     runescapeName: string | null
     image: string | null
+    hasOverride?: boolean
+    originalRunescapeName?: string | null
     hasMetadata?: boolean
+    skillLevel?: string | null
   }
   isLeader: boolean
 }
@@ -94,7 +97,29 @@ type Participant = {
   name: string | null
   runescapeName: string | null
   image: string | null
+  hasOverride?: boolean
+  originalRunescapeName?: string | null
   hasMetadata?: boolean
+  skillLevel?: string | null
+}
+
+function getSkillRingClass(skillLevel?: string | null) {
+  if (!skillLevel)
+    return "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+  switch (skillLevel) {
+    case "beginner":
+      return "ring-2 ring-green-500 ring-offset-2 ring-offset-background"
+    case "intermediate":
+      return "ring-2 ring-blue-500 ring-offset-2 ring-offset-background"
+    case "advanced":
+      return "ring-2 ring-purple-500 ring-offset-2 ring-offset-background"
+    case "expert":
+      return "ring-2 ring-red-500 ring-offset-2 ring-offset-background"
+    case "pvmgod":
+      return "ring-2 ring-yellow-500 ring-offset-2 ring-offset-background"
+    default:
+      return "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+  }
 }
 
 const PlayerDragOverlay = ({ activeDragData }: { activeDragData: any }) => {
@@ -102,9 +127,7 @@ const PlayerDragOverlay = ({ activeDragData }: { activeDragData: any }) => {
 
   if (activeDragData.type === "member") {
     const member = activeDragData.member
-    const avatarRingClass = member.user.hasMetadata
-      ? "ring-2 ring-green-500 ring-offset-2 ring-offset-background"
-      : "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+    const avatarRingClass = getSkillRingClass(member.user.skillLevel)
 
     return (
       <div className="absolute -left-4 -top-9 flex min-w-64 items-center gap-4 rounded-md border-2 border-secondary bg-card py-4 pl-4 shadow-2xl">
@@ -132,9 +155,7 @@ const PlayerDragOverlay = ({ activeDragData }: { activeDragData: any }) => {
 
   if (activeDragData.type === "unassigned") {
     const participant = activeDragData.participant
-    const avatarRingClass = participant.hasMetadata
-      ? "ring-2 ring-green-500 ring-offset-2 ring-offset-background"
-      : "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+    const avatarRingClass = getSkillRingClass(participant.skillLevel)
 
     return (
       <div className="absolute -left-4 -top-9 flex min-w-64 items-center gap-4 rounded-md border-2 border-secondary bg-card py-4 pl-4 shadow-2xl">
@@ -148,9 +169,13 @@ const PlayerDragOverlay = ({ activeDragData }: { activeDragData: any }) => {
             {participant.name?.[0] ?? "U"}
           </AvatarFallback>
         </Avatar>
-        <span className="font-medium">
-          {participant.runescapeName ?? participant.name}
-        </span>
+        <div className="flex w-full items-center justify-between">
+          <span className="truncate">
+            {participant.hasOverride && participant.originalRunescapeName
+              ? `${participant.runescapeName} (${participant.originalRunescapeName})`
+              : participant.runescapeName ?? participant.name}
+          </span>
+        </div>
       </div>
     )
   }
@@ -181,10 +206,8 @@ function DraggableMember({
     },
   })
 
-  // Determine avatar ring color based on metadata status
-  const avatarRingClass = member.user.hasMetadata
-    ? "ring-2 ring-green-500 ring-offset-2 ring-offset-background"
-    : "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+  // Determine avatar ring color based on skill level
+  const avatarRingClass = getSkillRingClass(member.user.skillLevel)
 
   return (
     <li
@@ -207,7 +230,7 @@ function DraggableMember({
           className="group mr-2 flex min-w-0 flex-1 items-center space-x-2 rounded-sm p-1 transition-colors"
           title="Click to edit player metadata"
         >
-          <div className="relative flex-shrink-0">
+          <div className="relative shrink-0">
             <Avatar className={`h-6 w-6 ${avatarRingClass}`}>
               <AvatarImage
                 src={member.user.image ?? undefined}
@@ -224,10 +247,12 @@ function DraggableMember({
               </div>
             )}
           </div>
-          <span className="truncate group-hover:text-primary">
-            {member.user.runescapeName ?? member.user.name}
-          </span>
-          <User className="h-3 w-3 flex-shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+          <p className="text-sm font-medium leading-none">
+            {member.user.hasOverride && member.user.originalRunescapeName
+              ? `${member.user.runescapeName} (${member.user.originalRunescapeName})`
+              : member.user.runescapeName ?? member.user.name}
+          </p>
+          <User className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
         </button>
 
         {/* Enhanced metadata indicator with tooltip */}
@@ -236,7 +261,7 @@ function DraggableMember({
             <TooltipTrigger asChild>
               <button
                 onClick={onEditMetadata}
-                className="flex-shrink-0 transition-transform hover:scale-110"
+                className="shrink-0 transition-transform hover:scale-110"
               >
                 {member.user.hasMetadata ? (
                   <Badge
@@ -269,7 +294,7 @@ function DraggableMember({
           </Tooltip>
         </TooltipProvider>
       </div>
-      <div className="mr-1 flex flex-shrink-0">
+      <div className="mr-1 flex shrink-0">
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -464,7 +489,7 @@ function TeamCard({
 
   return (
     <Card className="flex flex-col overflow-hidden border-2 transition-shadow hover:shadow-md">
-      <CardHeader className="flex-shrink-0 bg-secondary/30 pb-2">
+      <CardHeader className="shrink-0 bg-secondary/30 pb-2">
         <CardTitle className="flex items-center justify-between text-base">
           {editingTeamId === team.id ? (
             <Input
@@ -500,7 +525,7 @@ function TeamCard({
 
       {/* Prominent Statistics Header Banner */}
       {teamStats && (
-        <div className="flex-shrink-0 border-b-2 border-border bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 px-4 py-3">
+        <div className="shrink-0 border-b-2 border-border bg-linear-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 px-4 py-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-3">
               {/* Team Size Badge */}
@@ -554,6 +579,29 @@ function TeamCard({
                 </TooltipProvider>
               )}
 
+              {/* Skill Level Badge */}
+              {teamStats.averageSkillLevel !== null &&
+                teamStats.averageSkillLevel !== undefined && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          className="flex items-center gap-1.5 bg-background"
+                        >
+                          <Crown className="h-3 w-3 text-yellow-500" />
+                          <span className="font-medium">
+                            Avg Skill: {teamStats.averageSkillLevel.toFixed(1)}
+                          </span>
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        Average Team Skill Level (1-5)
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+
               {/* Balance Score */}
               {eventAvgEHP && eventAvgEHB && (
                 <TooltipProvider>
@@ -580,7 +628,7 @@ function TeamCard({
               variant="ghost"
               size="sm"
               onClick={() => setIsCollapsed(!isCollapsed)}
-              className="h-7 flex-shrink-0 px-2"
+              className="h-7 shrink-0 px-2"
             >
               {isCollapsed ? (
                 <ChevronDown className="h-4 w-4" />
@@ -847,10 +895,8 @@ function DraggableUnassignedParticipant({
     },
   })
 
-  // Determine avatar ring color based on metadata status
-  const avatarRingClass = participant.hasMetadata
-    ? "ring-2 ring-green-500 ring-offset-2 ring-offset-background"
-    : "ring-2 ring-orange-400 ring-offset-2 ring-offset-background"
+  // Determine avatar ring color based on skill level
+  const avatarRingClass = getSkillRingClass(participant.skillLevel)
 
   return (
     <li
@@ -863,7 +909,7 @@ function DraggableUnassignedParticipant({
         ref={setNodeRef}
         {...attributes}
         {...listeners}
-        className="flex-shrink-0 cursor-grab rounded-sm p-1 hover:bg-secondary active:cursor-grabbing"
+        className="shrink-0 cursor-grab rounded-sm p-1 hover:bg-secondary active:cursor-grabbing"
       >
         <GripVertical className="h-4 w-4 text-muted-foreground" />
       </div>
@@ -874,7 +920,7 @@ function DraggableUnassignedParticipant({
         className="group -ml-1 flex min-w-0 flex-1 items-center space-x-2 rounded-sm p-1 transition-colors hover:bg-secondary/50"
         title="Click to edit player metadata"
       >
-        <Avatar className={`h-7 w-7 flex-shrink-0 ${avatarRingClass}`}>
+        <Avatar className={`h-7 w-7 shrink-0 ${avatarRingClass}`}>
           <AvatarImage
             src={participant.image ?? undefined}
             alt={participant.name ?? ""}
@@ -886,7 +932,7 @@ function DraggableUnassignedParticipant({
         <span className="truncate text-sm font-medium group-hover:text-primary">
           {participant.runescapeName ?? participant.name}
         </span>
-        <User className="h-3 w-3 flex-shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+        <User className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
       </button>
 
       {/* Enhanced metadata indicator */}
@@ -895,7 +941,7 @@ function DraggableUnassignedParticipant({
           <TooltipTrigger asChild>
             <button
               onClick={onEditMetadata}
-              className="flex-shrink-0 transition-transform hover:scale-110"
+              className="shrink-0 transition-transform hover:scale-110"
             >
               {participant.hasMetadata ? (
                 <Badge
@@ -945,14 +991,26 @@ export function TeamManagement({ eventId }: { eventId: string }) {
     runescapeName: string | null
   } | null>(null)
   const [statistics, setStatistics] = useState<EventTeamStatistics | null>(null)
-  const [statisticsLoading, setStatisticsLoading] = useState(false)
+  const [_, setStatisticsLoading] = useState(false)
 
-  // Get unassigned participants
+  // Get unassigned participants, sorted by skill level (descending)
   const unassignedParticipants = useMemo(() => {
-    return participants.filter(
+    const unassigned = participants.filter(
       (p) =>
         !teams.some((team) => team.teamMembers.some((m) => m.user.id === p.id))
     )
+    const skillOrder: Record<string, number> = {
+      pvmgod: 5,
+      expert: 4,
+      advanced: 3,
+      intermediate: 2,
+      beginner: 1,
+    }
+    return unassigned.sort((a, b) => {
+      const aVal = a.skillLevel ? skillOrder[a.skillLevel] || 0 : 0
+      const bVal = b.skillLevel ? skillOrder[b.skillLevel] || 0 : 0
+      return bVal - aVal
+    })
   }, [participants, teams])
 
   useEffect(() => {
@@ -1003,14 +1061,15 @@ export function TeamManagement({ eventId }: { eventId: string }) {
   const handleCreateTeam = async () => {
     if (!newTeamName.trim()) return
     try {
-      await createTeam(eventId, newTeamName)
+      const res = await createTeam(eventId, newTeamName)
+      if (!res?.success) throw new Error(res?.error || "Failed to create team")
       setNewTeamName("")
       await fetchTeamsAndParticipants()
       toast({ title: "Team created successfully" })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to create team",
+        description: error.message || "Failed to create team",
         variant: "destructive",
       })
     }
@@ -1018,13 +1077,15 @@ export function TeamManagement({ eventId }: { eventId: string }) {
 
   const handleAddUserToTeam = async (teamId: string, userId: string) => {
     try {
-      await addUserToTeam(teamId, userId)
+      const res = await addUserToTeam(teamId, userId)
+      if (!res?.success)
+        throw new Error(res?.error || "Failed to add user to team")
       await fetchTeamsAndParticipants()
       toast({ title: "User added to team" })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to add user to team",
+        description: error.message || "Failed to add user to team",
         variant: "destructive",
       })
     }
@@ -1032,13 +1093,15 @@ export function TeamManagement({ eventId }: { eventId: string }) {
 
   const handleRemoveUserFromTeam = async (teamId: string, userId: string) => {
     try {
-      await removeUserFromTeam(teamId, userId)
+      const res = await removeUserFromTeam(teamId, userId)
+      if (!res?.success)
+        throw new Error(res?.error || "Failed to remove user from team")
       await fetchTeamsAndParticipants()
       toast({ title: "User removed from team" })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to remove user from team",
+        description: error.message || "Failed to remove user from team",
         variant: "destructive",
       })
     }
@@ -1048,13 +1111,14 @@ export function TeamManagement({ eventId }: { eventId: string }) {
     if (!confirm("Are you sure you want to delete this team?")) return
 
     try {
-      await deleteTeam(teamId)
+      const res = await deleteTeam(teamId)
+      if (!res?.success) throw new Error(res?.error || "Failed to delete team")
       await fetchTeamsAndParticipants()
       toast({ title: "Team deleted successfully" })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to delete team",
+        description: error.message || "Failed to delete team",
         variant: "destructive",
       })
     }
@@ -1066,15 +1130,17 @@ export function TeamManagement({ eventId }: { eventId: string }) {
     currentIsLeader: boolean
   ) => {
     try {
-      await updateTeamMember(teamId, userId, !currentIsLeader)
+      const res = await updateTeamMember(teamId, userId, !currentIsLeader)
+      if (!res?.success)
+        throw new Error(res?.error || "Failed to update team leader")
       await fetchTeamsAndParticipants()
       toast({
         title: currentIsLeader ? "Team leader removed" : "Team leader assigned",
       })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to update team leader",
+        description: error.message || "Failed to update team leader",
         variant: "destructive",
       })
     }
@@ -1102,14 +1168,16 @@ export function TeamManagement({ eventId }: { eventId: string }) {
   const handleSaveTeamName = async (teamId: string) => {
     if (!editedTeamName.trim()) return
     try {
-      await updateTeamName(teamId, editedTeamName)
+      const res = await updateTeamName(teamId, editedTeamName)
+      if (!res?.success)
+        throw new Error(res?.error || "Failed to update team name")
       await fetchTeamsAndParticipants()
       setEditingTeamId(null)
       toast({ title: "Team name updated" })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to update team name",
+        description: error.message || "Failed to update team name",
         variant: "destructive",
       })
     }
@@ -1129,7 +1197,7 @@ export function TeamManagement({ eventId }: { eventId: string }) {
 
     // Extract data from the active and over elements
     const activeData = active.data.current
-    const overId = over.id as string
+
     const overData = over.data.current
 
     // Handle dropping a team member onto a team
@@ -1143,15 +1211,20 @@ export function TeamManagement({ eventId }: { eventId: string }) {
       }
 
       try {
-        // Remove from current team and add to new team
-        await removeUserFromTeam(activeData.teamId, activeData.member.user.id)
-        await addUserToTeam(targetTeamId, activeData.member.user.id)
+        // Use the proper transaction function instead of sequential add/remove
+        const res = await assignParticipantToTeam(
+          eventId,
+          activeData.member.user.id,
+          targetTeamId
+        )
+        if (!res?.success)
+          throw new Error(res?.error || "Failed to move team member")
         await fetchTeamsAndParticipants()
         toast({ title: "Member moved to new team" })
-      } catch (error) {
+      } catch (error: any) {
         toast({
           title: "Error",
-          description: "Failed to move team member",
+          description: error.message || "Failed to move team member",
           variant: "destructive",
         })
       }
@@ -1161,13 +1234,15 @@ export function TeamManagement({ eventId }: { eventId: string }) {
       const targetTeamId = overData.teamId
 
       try {
-        await addUserToTeam(targetTeamId, activeData.participant.id)
+        const res = await addUserToTeam(targetTeamId, activeData.participant.id)
+        if (!res?.success)
+          throw new Error(res?.error || "Failed to add participant to team")
         await fetchTeamsAndParticipants()
         toast({ title: "Participant added to team" })
-      } catch (error) {
+      } catch (error: any) {
         toast({
           title: "Error",
-          description: "Failed to add participant to team",
+          description: error.message || "Failed to add participant to team",
           variant: "destructive",
         })
       }
@@ -1178,13 +1253,18 @@ export function TeamManagement({ eventId }: { eventId: string }) {
       overData.type === "unassigned-pool"
     ) {
       try {
-        await removeUserFromTeam(activeData.teamId, activeData.member.user.id)
+        const res = await removeUserFromTeam(
+          activeData.teamId,
+          activeData.member.user.id
+        )
+        if (!res?.success)
+          throw new Error(res?.error || "Failed to remove team member")
         await fetchTeamsAndParticipants()
         toast({ title: "Member removed from team" })
-      } catch (error) {
+      } catch (error: any) {
         toast({
           title: "Error",
-          description: "Failed to remove team member",
+          description: error.message || "Failed to remove team member",
           variant: "destructive",
         })
       }

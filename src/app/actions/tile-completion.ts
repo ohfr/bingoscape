@@ -1,13 +1,13 @@
 "use server"
 
- 
- 
- 
- 
-
 import { db } from "@/server/db"
-import { logger } from "@/lib/logger";
-import { goals, goalGroups, teamGoalProgress, teamTileSubmissions } from "@/server/db/schema"
+import { logger } from "@/lib/logger"
+import {
+  goals,
+  goalGroups,
+  teamGoalProgress,
+  teamTileSubmissions,
+} from "@/server/db/schema"
 import { eq, and, isNull } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 
@@ -15,31 +15,44 @@ interface GoalEvaluationNode {
   type: "goal" | "group"
   id: string
   isComplete: boolean
-  operator?: "AND" | "OR"
+  currentValue?: number
+  operator?: "AND" | "OR" | "SUM"
   children?: GoalEvaluationNode[]
 }
 
 /**
  * Evaluate if a goal is complete for a team
  */
-async function evaluateGoal(goalId: string, teamId: string): Promise<boolean> {
+async function evaluateGoal(
+  goalId: string,
+  teamId: string
+): Promise<{ isComplete: boolean; currentValue: number }> {
   const goal = await db.query.goals.findFirst({
     where: eq(goals.id, goalId),
   })
 
-  if (!goal) return false
+  if (!goal) return { isComplete: false, currentValue: 0 }
 
   const progress = await db.query.teamGoalProgress.findFirst({
-    where: and(eq(teamGoalProgress.goalId, goalId), eq(teamGoalProgress.teamId, teamId)),
+    where: and(
+      eq(teamGoalProgress.goalId, goalId),
+      eq(teamGoalProgress.teamId, teamId)
+    ),
   })
 
-  return (progress?.currentValue || 0) >= goal.targetValue
+  return {
+    isComplete: (progress?.currentValue || 0) >= goal.targetValue,
+    currentValue: progress?.currentValue || 0,
+  }
 }
 
 /**
  * Recursively evaluate a goal group
  */
-async function evaluateGroup(groupId: string, teamId: string): Promise<GoalEvaluationNode> {
+export async function evaluateGroup(
+  groupId: string,
+  teamId: string
+): Promise<GoalEvaluationNode> {
   const group = await db.query.goalGroups.findFirst({
     where: eq(goalGroups.id, groupId),
     with: {
@@ -68,29 +81,49 @@ async function evaluateGroup(groupId: string, teamId: string): Promise<GoalEvalu
 
   // Evaluate child goals
   for (const childGoal of group.goals) {
-    const isComplete = await evaluateGoal(childGoal.id, teamId)
+    const { isComplete, currentValue } = await evaluateGoal(
+      childGoal.id,
+      teamId
+    )
     children.push({
       type: "goal",
       id: childGoal.id,
       isComplete,
+      currentValue,
     })
   }
 
   // Apply logical operator
   let isComplete = false
+  let currentValue = 0
   if (group.logicalOperator === "AND") {
-    isComplete = children.length > 0 && children.every((child) => child.isComplete)
-  } else {
+    isComplete =
+      children.length > 0 && children.every((child) => child.isComplete)
+    currentValue = isComplete ? 1 : 0
+  } else if (group.logicalOperator === "OR") {
     // OR - check if at least minRequiredGoals are complete
     const completedCount = children.filter((child) => child.isComplete).length
     const minRequired = group.minRequiredGoals || 1 // Default to 1 for backwards compatibility
     isComplete = completedCount >= minRequired
+    currentValue = isComplete ? 1 : 0
+  } else {
+    // SUM - pool uncapped progress from goals, and 1/0 from groups
+    for (const child of children) {
+      if (child.type === "goal") {
+        currentValue += child.currentValue || 0
+      } else {
+        currentValue += child.isComplete ? 1 : 0
+      }
+    }
+    const minRequired = group.minRequiredGoals || 1
+    isComplete = currentValue >= minRequired
   }
 
   return {
     type: "group",
     id: groupId,
     isComplete,
+    currentValue,
     operator: group.logicalOperator,
     children,
   }
@@ -99,11 +132,17 @@ async function evaluateGroup(groupId: string, teamId: string): Promise<GoalEvalu
 /**
  * Evaluate if a tile should be complete based on its goal tree
  */
-export async function evaluateTileCompletion(tileId: string, teamId: string): Promise<boolean> {
+export async function evaluateTileCompletion(
+  tileId: string,
+  teamId: string
+): Promise<boolean> {
   try {
     // Get all root-level groups and goals for this tile
     const rootGroups = await db.query.goalGroups.findMany({
-      where: and(eq(goalGroups.tileId, tileId), isNull(goalGroups.parentGroupId)),
+      where: and(
+        eq(goalGroups.tileId, tileId),
+        isNull(goalGroups.parentGroupId)
+      ),
     })
 
     const rootGoals = await db.query.goals.findMany({
@@ -125,11 +164,12 @@ export async function evaluateTileCompletion(tileId: string, teamId: string): Pr
 
     // Evaluate root goals
     for (const goal of rootGoals) {
-      const isComplete = await evaluateGoal(goal.id, teamId)
+      const { isComplete, currentValue } = await evaluateGoal(goal.id, teamId)
       evaluationNodes.push({
         type: "goal",
         id: goal.id,
         isComplete,
+        currentValue,
       })
     }
 
@@ -148,27 +188,40 @@ export async function checkAndAutoCompleteTile(tileId: string, teamId: string) {
   try {
     // Check if tile is already submitted
     const existingSubmission = await db.query.teamTileSubmissions.findFirst({
-      where: and(eq(teamTileSubmissions.tileId, tileId), eq(teamTileSubmissions.teamId, teamId)),
+      where: and(
+        eq(teamTileSubmissions.tileId, tileId),
+        eq(teamTileSubmissions.teamId, teamId)
+      ),
     })
 
     // Evaluate if tile is complete
     const isComplete = await evaluateTileCompletion(tileId, teamId)
 
     if (!isComplete) {
+      // Revert to incomplete if it was previously completed
+      if (existingSubmission?.status === "completed") {
+        await db
+          .update(teamTileSubmissions)
+          .set({
+            status: "incomplete",
+            updatedAt: new Date(),
+          })
+          .where(eq(teamTileSubmissions.id, existingSubmission.id))
+      }
       return { success: true, shouldComplete: false }
     }
 
-    // If submission exists and is already approved, nothing to do
-    if (existingSubmission?.status === "approved") {
+    // If submission exists and is already completed, nothing to do
+    if (existingSubmission?.status === "completed") {
       return { success: true, alreadyApproved: true }
     }
 
-    // If submission exists but not approved, update it to approved
+    // If submission exists but not completed, update it to completed
     if (existingSubmission) {
       const [updatedSubmission] = await db
         .update(teamTileSubmissions)
         .set({
-          status: "approved",
+          status: "completed",
           updatedAt: new Date(),
         })
         .where(eq(teamTileSubmissions.id, existingSubmission.id))
@@ -185,13 +238,13 @@ export async function checkAndAutoCompleteTile(tileId: string, teamId: string) {
       }
     }
 
-    // No submission exists, create a new one with approved status
+    // No submission exists, create a new one with completed status
     const [newSubmission] = await db
       .insert(teamTileSubmissions)
       .values({
         tileId,
         teamId,
-        status: "approved",
+        status: "completed",
       })
       .returning()
 
@@ -213,10 +266,16 @@ export async function checkAndAutoCompleteTile(tileId: string, teamId: string) {
 /**
  * Get detailed evaluation tree for debugging/display
  */
-export async function getDetailedEvaluation(tileId: string, teamId: string): Promise<GoalEvaluationNode[]> {
+export async function getDetailedEvaluation(
+  tileId: string,
+  teamId: string
+): Promise<GoalEvaluationNode[]> {
   try {
     const rootGroups = await db.query.goalGroups.findMany({
-      where: and(eq(goalGroups.tileId, tileId), isNull(goalGroups.parentGroupId)),
+      where: and(
+        eq(goalGroups.tileId, tileId),
+        isNull(goalGroups.parentGroupId)
+      ),
     })
 
     const rootGoals = await db.query.goals.findMany({
@@ -231,11 +290,12 @@ export async function getDetailedEvaluation(tileId: string, teamId: string): Pro
     }
 
     for (const goal of rootGoals) {
-      const isComplete = await evaluateGoal(goal.id, teamId)
+      const { isComplete, currentValue } = await evaluateGoal(goal.id, teamId)
       evaluationNodes.push({
         type: "goal",
         id: goal.id,
         isComplete,
+        currentValue,
       })
     }
 

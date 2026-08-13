@@ -3,11 +3,7 @@
  * Re-exports from osrs-item-data package with additional goal-specific types
  */
 
-import type {
-  OsrsItem,
-  ImageUrlOptions,
-  ItemFilter,
-} from "osrs-item-data"
+import type { OsrsItem, ImageUrlOptions, ItemFilter } from "osrs-item-data"
 
 // Re-export core types from osrs-item-data
 export type { OsrsItem, ImageUrlOptions, ItemFilter }
@@ -35,7 +31,7 @@ export interface GoalWithItem {
   parentGroupId: string | null
   description: string
   targetValue: number
-  goalType: "generic" | "item"
+  goalType: "generic" | "item" | "metric"
   orderIndex: number
   createdAt: Date
   updatedAt: Date

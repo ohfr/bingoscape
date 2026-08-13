@@ -8,12 +8,12 @@ describe("getSunkShipTileIds", () => {
   ]
 
   it("returns empty when no hits", () => {
-    expect(getSunkShipTileIds(ships, [], "attacker")).toEqual([])
+    expect([...getSunkShipTileIds(ships, [], "attacker")]).toEqual([])
   })
 
   it("returns empty when ship is only partially hit", () => {
     const hits = [{ tileId: "a", attackerTeamId: "attacker" }]
-    expect(getSunkShipTileIds(ships, hits, "attacker")).toEqual([])
+    expect([...getSunkShipTileIds(ships, hits, "attacker")]).toEqual([])
   })
 
   it("returns all tiles on a fully sunk ship", () => {
@@ -21,7 +21,7 @@ describe("getSunkShipTileIds", () => {
       { tileId: "d", attackerTeamId: "attacker" },
       { tileId: "e", attackerTeamId: "attacker" },
     ]
-    expect(getSunkShipTileIds(ships, hits, "attacker").sort()).toEqual([
+    expect([...getSunkShipTileIds(ships, hits, "attacker")].sort()).toEqual([
       "d",
       "e",
     ])
@@ -32,11 +32,11 @@ describe("getSunkShipTileIds", () => {
       { tileId: "d", attackerTeamId: "other" },
       { tileId: "e", attackerTeamId: "attacker" },
     ]
-    expect(getSunkShipTileIds(ships, hits, "attacker")).toEqual([])
+    expect([...getSunkShipTileIds(ships, hits, "attacker")]).toEqual([])
   })
 
   it("does not treat own ships as sunk", () => {
     const hits = [{ tileId: "x", attackerTeamId: "attacker" }]
-    expect(getSunkShipTileIds(ships, hits, "attacker")).toEqual([])
+    expect([...getSunkShipTileIds(ships, hits, "attacker")]).toEqual([])
   })
 })

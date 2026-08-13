@@ -41,15 +41,8 @@ import {
   Heart,
   UserPlus,
 } from "lucide-react"
-import {
-  updateParticipantRole,
-  assignParticipantToTeam,
-  updateParticipantBuyIn,
-  removeParticipantFromEvent,
-  getEventParticipants,
-} from "@/app/actions/events"
+import { updateParticipantRole, assignParticipantToTeam, updateParticipantBuyIn, removeParticipantFromEvent, getEventParticipants } from "@/app/actions/events"
 import formatRunescapeGold from "@/lib/formatRunescapeGold"
-import type { UUID } from "crypto"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -774,6 +767,11 @@ export function ParticipantsTab({
         <TableCell className="font-medium">
           <div className="flex items-center gap-2">
             <span>{participant.runescapeName}</span>
+            {participant.hasOverride && (
+              <Badge variant="outline" className="text-xs">
+                Alt
+              </Badge>
+            )}
           </div>
         </TableCell>
         <TableCell>

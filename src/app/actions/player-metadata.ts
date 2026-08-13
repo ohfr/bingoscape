@@ -2,10 +2,10 @@
 
 import { getServerAuthSession } from "@/server/auth"
 import { db } from "@/server/db"
-import { playerMetadata, eventParticipants, events } from "@/server/db/schema"
+import { playerMetadata, eventParticipants } from "@/server/db/schema"
 import { eq, and } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
-import { fetchPlayerDataFromWOM, type WOMPlayerData } from "./wiseoldman"
+import { fetchPlayerDataFromWOM } from "./wiseoldman"
 
 /**
  * Get player metadata for a specific user in a specific event
@@ -63,9 +63,17 @@ export async function updatePlayerMetadata(
     ehb?: number | null
     combatLevel?: number | null
     totalLevel?: number | null
+    skillLevel?:
+      | "beginner"
+      | "intermediate"
+      | "advanced"
+      | "expert"
+      | "pvmgod"
+      | null
     timezone?: string | null
     dailyHoursAvailable?: number | null
     notes?: string | null
+    runescapeNameOverride?: string | null
     womPlayerData?: string | null
     lastFetchedFromWOM?: Date | null
   }
@@ -83,8 +91,13 @@ export async function updatePlayerMetadata(
     ),
   })
 
-  if (!participant || (participant.role !== "management" && participant.role !== "admin")) {
-    throw new Error("Unauthorized: You must be a management user for this event")
+  if (
+    !participant ||
+    (participant.role !== "management" && participant.role !== "admin")
+  ) {
+    throw new Error(
+      "Unauthorized: You must be a management user for this event"
+    )
   }
 
   // Check if metadata already exists
@@ -98,7 +111,7 @@ export async function updatePlayerMetadata(
   let result
   if (existing) {
     // Update existing metadata
-    [result] = await db
+    ;[result] = await db
       .update(playerMetadata)
       .set({
         ...data,
@@ -108,7 +121,7 @@ export async function updatePlayerMetadata(
       .returning()
   } else {
     // Create new metadata
-    [result] = await db
+    ;[result] = await db
       .insert(playerMetadata)
       .values({
         userId,
@@ -130,8 +143,16 @@ export async function updatePlayerMetadata(
 export async function updateOwnPlayerMetadata(
   eventId: string,
   data: {
+    skillLevel?:
+      | "beginner"
+      | "intermediate"
+      | "advanced"
+      | "expert"
+      | "pvmgod"
+      | null
     timezone?: string | null
     dailyHoursAvailable?: number | null
+    runescapeNameOverride?: string | null
   }
 ) {
   const session = await getServerAuthSession()
@@ -154,8 +175,10 @@ export async function updateOwnPlayerMetadata(
   // Only allow updating timezone and dailyHoursAvailable
   // Explicitly block any other fields to prevent tampering
   const allowedData = {
+    skillLevel: data.skillLevel,
     timezone: data.timezone,
     dailyHoursAvailable: data.dailyHoursAvailable,
+    runescapeNameOverride: data.runescapeNameOverride,
   }
 
   // Check if metadata already exists
@@ -169,7 +192,7 @@ export async function updateOwnPlayerMetadata(
   let result
   if (existing) {
     // Update existing metadata
-    [result] = await db
+    ;[result] = await db
       .update(playerMetadata)
       .set({
         ...allowedData,
@@ -179,7 +202,7 @@ export async function updateOwnPlayerMetadata(
       .returning()
   } else {
     // Create new metadata
-    [result] = await db
+    ;[result] = await db
       .insert(playerMetadata)
       .values({
         userId: session.user.id,
@@ -211,8 +234,13 @@ export async function deletePlayerMetadata(userId: string, eventId: string) {
     ),
   })
 
-  if (!participant || (participant.role !== "management" && participant.role !== "admin")) {
-    throw new Error("Unauthorized: You must be a management user for this event")
+  if (
+    !participant ||
+    (participant.role !== "management" && participant.role !== "admin")
+  ) {
+    throw new Error(
+      "Unauthorized: You must be a management user for this event"
+    )
   }
 
   await db
@@ -272,12 +300,27 @@ export async function fetchWOMDataForPlayer(
     ),
   })
 
-  if (!participant || (participant.role !== "management" && participant.role !== "admin")) {
-    throw new Error("Unauthorized: You must be a management user for this event")
+  if (
+    !participant ||
+    (participant.role !== "management" && participant.role !== "admin")
+  ) {
+    throw new Error(
+      "Unauthorized: You must be a management user for this event"
+    )
   }
 
+  // Check if user has an override
+  const metadata = await db.query.playerMetadata.findFirst({
+    where: and(
+      eq(playerMetadata.userId, userId),
+      eq(playerMetadata.eventId, eventId)
+    ),
+  })
+  
+  const effectiveName = metadata?.runescapeNameOverride || runescapeName
+
   // Fetch from WiseOldMan
-  const result = await fetchPlayerDataFromWOM(runescapeName)
+  const result = await fetchPlayerDataFromWOM(effectiveName)
 
   return result
 }

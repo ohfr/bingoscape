@@ -2,22 +2,38 @@ import EventList from "@/components/eventlist"
 import TemplatePreviewWithTooltip from "@/components/template-preview-with-tooltip"
 import getTemplateBoard from "@/lib/getTemplateBoard"
 import { getServerAuthSession } from "@/server/auth"
-import { getEvents } from "@/app/actions/events"
+
 import Link from "next/link"
 
-export const dynamic = "force-dynamic"
+import { Suspense } from "react"
+import { getEvents } from "@/server/queries/events"
+
+async function LoggedInDashboard({ userId }: { userId: string }) {
+  const events = await getEvents(userId)
+
+  return (
+    <div className="space-y-8">
+      <EventList userId={userId} initialEvents={events} />
+    </div>
+  )
+}
 
 export default async function HomePage() {
   const session = await getServerAuthSession()
-  const events = session ? await getEvents(session.user.id) : []
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       <main className="container mx-auto px-4 py-8">
         {session ? (
-          <div className="space-y-8">
-            <EventList userId={session.user.id} initialEvents={events} />
-          </div>
+          <Suspense
+            fallback={
+              <div className="flex h-64 items-center justify-center">
+                <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary"></div>
+              </div>
+            }
+          >
+            <LoggedInDashboard userId={session.user.id} />
+          </Suspense>
         ) : (
           <>
             {/* Hero Section */}
@@ -27,7 +43,7 @@ export default async function HomePage() {
                 <div className="mb-6 inline-block rounded-full bg-primary/10 px-4 py-2 text-sm font-medium text-primary">
                   🎯 The Ultimate OSRS Bingo Platform
                 </div>
-                <h1 className="mb-6 bg-gradient-to-r from-primary to-blue-600 bg-clip-text text-6xl font-bold text-transparent lg:text-7xl">
+                <h1 className="mb-6 bg-linear-to-r from-primary to-blue-600 bg-clip-text text-6xl font-bold text-transparent lg:text-7xl">
                   BingoScape
                 </h1>
                 <p className="mx-auto mb-8 max-w-3xl text-xl leading-relaxed text-muted-foreground lg:text-2xl">
@@ -58,9 +74,9 @@ export default async function HomePage() {
             <div className="p-8 lg:p-12">
               <div className="flex flex-col items-center gap-12 lg:flex-row">
                 <div className="flex-1">
-                  <h3 className="mb-4 text-2xl font-bold lg:text-3xl">
+                  <h2 className="mb-4 text-2xl font-bold lg:text-3xl">
                     See BingoScape in Action
-                  </h3>
+                  </h2>
                   <p className="mb-6 text-lg text-muted-foreground">
                     Experience dynamic bingo boards with custom goals, real-time
                     tracking, and seamless integration with your OSRS gameplay.
@@ -109,7 +125,7 @@ export default async function HomePage() {
               </div>
 
               <div className="mb-16 grid grid-cols-1 gap-8 md:grid-cols-3">
-                <div className="rounded-xl border bg-card p-8 shadow-sm transition-shadow hover:shadow-md">
+                <div className="rounded-xl border bg-card p-8 shadow-xs transition-shadow hover:shadow-md">
                   <div className="mb-6 w-fit rounded-full bg-red-500/10 p-4">
                     <span className="text-3xl">❤️</span>
                   </div>
@@ -123,7 +139,7 @@ export default async function HomePage() {
                   </p>
                 </div>
 
-                <div className="rounded-xl border bg-card p-8 shadow-sm transition-shadow hover:shadow-md">
+                <div className="rounded-xl border bg-card p-8 shadow-xs transition-shadow hover:shadow-md">
                   <div className="mb-6 w-fit rounded-full bg-blue-500/10 p-4">
                     <span className="text-3xl">📸</span>
                   </div>
@@ -136,7 +152,7 @@ export default async function HomePage() {
                   </p>
                 </div>
 
-                <div className="rounded-xl border bg-card p-8 shadow-sm transition-shadow hover:shadow-md">
+                <div className="rounded-xl border bg-card p-8 shadow-xs transition-shadow hover:shadow-md">
                   <div className="mb-6 w-fit rounded-full bg-green-500/10 p-4">
                     <span className="text-3xl">🤝</span>
                   </div>

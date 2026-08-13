@@ -1,7 +1,7 @@
 "use server"
 
 import { hashPassword } from "@/lib/password"
-import { logger } from "@/lib/logger";
+import { logger } from "@/lib/logger"
 import { signUpSchema, type SignUpInput } from "@/lib/validation/auth"
 import { db } from "@/server/db"
 import { users } from "@/server/db/schema"
@@ -72,7 +72,7 @@ export async function registerUser(input: SignUpInput) {
     }
 
     // Log other errors but don't expose details
-    logger.error({ error }, "Registration error:", error)
+    logger.error("Registration error")
     return {
       success: false,
       error: "An unexpected error occurred. Please try again.",

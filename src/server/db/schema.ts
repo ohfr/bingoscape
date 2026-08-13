@@ -137,6 +137,11 @@ export const submissionStatusEnum = pgEnum("submission_status", [
   "approved", // renamed from "accepted"
   "needs_review", // renamed from "requires_interaction"
 ])
+export const tileCompletionStatusEnum = pgEnum("tile_completion_status", [
+  "incomplete",
+  "completed",
+  "needs_attention",
+])
 export const clanRoleEnum = pgEnum("clan_role", [
   "admin",
   "management",
@@ -159,8 +164,12 @@ export const bingoTypeEnum = pgEnum("bingo_type", [
   "battleship",
 ])
 export const gameTypeEnum = pgEnum("game_type", ["osrs", "rs3"])
-export const logicalOperatorEnum = pgEnum("logical_operator", ["AND", "OR"])
-export const goalTypeEnum = pgEnum("goal_type", ["generic", "item"])
+export const logicalOperatorEnum = pgEnum("logical_operator", [
+  "AND",
+  "OR",
+  "SUM",
+])
+export const goalTypeEnum = pgEnum("goal_type", ["generic", "item", "metric"])
 export const skillLevelEnum = pgEnum("skill_level", [
   "beginner",
   "intermediate",
@@ -183,9 +192,11 @@ export const playerMetadata = createTable(
     ehb: real("ehb"), // Efficient Hours Bossed (nullable)
     combatLevel: integer("combat_level"), // OSRS combat level from WiseOldMan
     totalLevel: integer("total_level"), // Total skill level from WiseOldMan
+    skillLevel: skillLevelEnum("skill_level"), // Perceived skill level
     timezone: varchar("timezone", { length: 100 }), // e.g., "America/New_York", "Europe/London"
     dailyHoursAvailable: real("daily_hours_available"), // Planned daily participation time
     notes: text("notes"), // Management notes about the player
+    runescapeNameOverride: varchar("runescape_name_override", { length: 255 }),
     womPlayerData: text("wom_player_data"), // JSON string of full WiseOldMan data (skills, bosses)
     lastFetchedFromWOM: timestamp("last_fetched_from_wom"), // Timestamp of last WOM fetch
     createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -215,9 +226,19 @@ export const events = createTable("events", {
   id: uuid("id").defaultRandom().primaryKey(),
   title: varchar("name", { length: 255 }).notNull(),
   description: varchar("description", { length: 1000 }),
-  startDate: timestamp("start_date").notNull(),
-  endDate: timestamp("end_date").notNull(),
-  registrationDeadline: timestamp("registration_deadline"),
+  startDate: timestamp("start_date", {
+    mode: "date",
+    withTimezone: true,
+  }).notNull(),
+  endDate: timestamp("end_date", {
+    mode: "date",
+    withTimezone: true,
+  }).notNull(),
+  registrationDeadline: timestamp("registration_deadline", {
+    mode: "date",
+    withTimezone: true,
+  }),
+  timezone: varchar("timezone", { length: 100 }).notNull().default("UTC"),
   creatorId: uuid("creator_id").references(() => users.id, {
     onDelete: "set null",
   }),
@@ -333,6 +354,12 @@ export const bingos = createTable("bingos", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   locked: boolean("locked").default(false).notNull(),
   visible: boolean("visible").default(false).notNull(),
+  scheduledUnlockDate: timestamp("scheduled_unlock_date", {
+    mode: "date",
+    withTimezone: true,
+  }),
+  womCompetitionId: integer("wom_competition_id"),
+  womVerificationCode: varchar("wom_verification_code", { length: 255 }),
 })
 
 export const bingosRelations = relations(bingos, ({ one, many }) => ({
@@ -356,6 +383,7 @@ export const teams = createTable("teams", {
     .notNull()
     .references(() => events.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 255 }).notNull(),
+  trackerTeamName: varchar("tracker_team_name", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 })
@@ -434,7 +462,7 @@ export const goalGroups = createTable("goal_groups", {
   ),
   name: text("name"), // Optional custom name for the group
   logicalOperator: logicalOperatorEnum("logical_operator").notNull(),
-  minRequiredGoals: integer("min_required_goals").notNull().default(1), // For OR groups: minimum number of goals that must be completed
+  minRequiredGoals: integer("min_required_goals").notNull().default(1), // For OR: min goals complete. For SUM: target cumulative progress
   orderIndex: integer("order_index").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -512,6 +540,25 @@ export const itemGoalsRelations = relations(itemGoals, ({ one }) => ({
   }),
 }))
 
+export const metricGoals = createTable("metric_goals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  goalId: uuid("goal_id")
+    .notNull()
+    .unique()
+    .references(() => goals.id, { onDelete: "cascade" }),
+  metricType: varchar("metric_type", { length: 50 }).notNull().default("skill"),
+  metricName: varchar("metric_name", { length: 100 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+})
+
+export const metricGoalsRelations = relations(metricGoals, ({ one }) => ({
+  goal: one(goals, {
+    fields: [metricGoals.goalId],
+    references: [goals.id],
+  }),
+}))
+
 export const goalsRelations = relations(goals, ({ one, many }) => ({
   tile: one(tiles, {
     fields: [goals.tileId],
@@ -528,6 +575,10 @@ export const goalsRelations = relations(goals, ({ one, many }) => ({
     fields: [goals.id],
     references: [itemGoals.goalId],
   }),
+  metricGoal: one(metricGoals, {
+    fields: [goals.id],
+    references: [metricGoals.goalId],
+  }),
 }))
 
 export const teamTileSubmissions = createTable(
@@ -540,7 +591,7 @@ export const teamTileSubmissions = createTable(
     teamId: uuid("team_id")
       .notNull()
       .references(() => teams.id, { onDelete: "cascade" }),
-    status: submissionStatusEnum("status").default("pending").notNull(),
+    status: tileCompletionStatusEnum("status").default("incomplete").notNull(),
     reviewedBy: uuid("reviewed_by").references(() => users.id, {
       onDelete: "set null",
     }),

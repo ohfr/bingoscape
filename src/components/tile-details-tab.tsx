@@ -1,17 +1,18 @@
 /* eslint-disable */
 "use client"
 
+import { useRouter } from "next/navigation"
+import { syncTrackerProgress } from "@/app/actions/tracker"
+import { toast } from "@/hooks/use-toast"
+
 import { useCallback } from "react"
 import { useState, useEffect } from "react"
 import type React from "react"
 import Image from "next/image"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { ForwardRefEditor } from "./forward-ref-editor"
-import type { Tile, Team } from "@/app/actions/events"
-import { Progress } from "@/components/ui/progress"
-import { AnimatedProgress } from "@/components/ui/animated-progress"
+
 import {
   Pencil,
   X,
@@ -19,11 +20,7 @@ import {
   EyeOff,
   Search,
   ExternalLink,
-  CheckCircle2,
-  Clock,
-  Network,
-  List,
-  Package,
+  RefreshCw,
 } from "lucide-react"
 import Markdown from "react-markdown"
 import { Switch } from "@/components/ui/switch"
@@ -37,15 +34,10 @@ import {
   DialogClose,
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
 import getRandomFrog from "@/lib/getRandomFrog"
 import { GoalProgressTree } from "./goal-progress-tree"
 import { getGoalTreeWithProgress } from "@/app/actions/goal-groups"
+import type { Tile, Team } from "@/types/model"
 
 type EditableTileFields = {
   title: string
@@ -62,6 +54,7 @@ interface TileDetailsTabProps {
   userRole: "admin" | "management" | "participant"
   teams: Team[]
   gameType: "osrs" | "rs3"
+  eventId?: string
   isProgressionBingo?: boolean
   onEditTile: <K extends keyof EditableTileFields>(
     field: K,
@@ -76,11 +69,6 @@ interface WikiImage {
   title: string
   url: string
   thumbnail: string
-}
-
-interface GoalProgress {
-  approved: number
-  total: number
 }
 
 function isValidImageUrl(url: string): boolean {
@@ -98,6 +86,7 @@ export function TileDetailsTab({
   userRole,
   teams,
   gameType,
+  eventId,
   isProgressionBingo = false,
   onEditTile,
   onUpdateTile,
@@ -239,7 +228,7 @@ export function TileDetailsTab({
           <div className="relative aspect-square w-full md:w-1/3">
             {isEditing && imagePreview && isValidImage ? (
               <Image
-                src={imagePreview || getRandomFrog()}
+                src={imagePreview}
                 alt="Header image preview"
                 fill
                 className="rounded-md object-contain"
@@ -527,6 +516,7 @@ export function TileDetailsTab({
             teams={teams}
             onUpdateProgress={onUpdateProgress}
             userRole={userRole}
+            eventId={eventId}
           />
         </div>
       </div>
@@ -537,13 +527,13 @@ export function TileDetailsTab({
 function TileProgress({
   selectedTile,
   teams,
-  onUpdateProgress,
   userRole,
 }: {
   selectedTile: Tile | null
   teams: Team[]
   onUpdateProgress: (goalId: string, teamId: string, newValue: number) => void
   userRole: "admin" | "management" | "participant"
+  eventId?: string
 }) {
   const [teamTreeData, setTeamTreeData] = useState<
     Map<string, { tree: any[]; teamProgress: any[] }>
@@ -580,8 +570,86 @@ function TileProgress({
     )
   }
 
+  const router = useRouter()
+  const [isSyncing, setIsSyncing] = useState(false)
+
+  const hasMetricGoals = selectedTile?.goals?.some(
+    (g: any) => g.goalType === "metric"
+  )
+  const canSync =
+    hasMetricGoals &&
+    selectedTile?.bingoId &&
+    (userRole === "admin" || userRole === "management")
+
+  const handleSync = async () => {
+    if (!selectedTile?.bingoId) return
+    setIsSyncing(true)
+
+    const { id, update } = toast({
+      title: (
+        <div className="flex items-center gap-2">
+          <RefreshCw className="h-4 w-4 animate-spin" />
+          <span>Syncing Tracker Data...</span>
+        </div>
+      ),
+      description:
+        "Fetching progress from WiseOldMan. This may take a few seconds.",
+      duration: 60000,
+    })
+
+    try {
+      const result = await syncTrackerProgress(selectedTile.bingoId)
+      if (result.success) {
+        update({
+          id,
+          title: "Sync complete",
+          description:
+            result.message || "Tracker data synchronized successfully.",
+          variant: "default",
+          duration: 5000,
+        })
+        router.refresh()
+      } else {
+        update({
+          id,
+          title: "Sync failed",
+          description: result.error || "Failed to synchronize tracker data.",
+          variant: "destructive",
+          duration: 5000,
+        })
+      }
+    } catch (error) {
+      update({
+        id,
+        title: "Error",
+        description: "An unexpected error occurred during sync.",
+        variant: "destructive",
+        duration: 5000,
+      })
+    } finally {
+      setIsSyncing(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
+      {canSync && (
+        <div className="flex justify-end">
+          <Button
+            onClick={handleSync}
+            disabled={isSyncing}
+            variant="outline"
+            size="sm"
+          >
+            {isSyncing ? (
+              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            {isSyncing ? "Syncing..." : "Sync Tracker Data"}
+          </Button>
+        </div>
+      )}
       {/* <h4 className="font-semibold text-lg">Team Progress</h4> */}
 
       <div className="space-y-6">

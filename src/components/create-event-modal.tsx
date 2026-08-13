@@ -1,8 +1,8 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useMemo, useEffect } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -19,19 +19,27 @@ import { createEvent } from "@/app/actions/events"
 import { toast } from "@/hooks/use-toast"
 import { useRouter } from "next/navigation"
 import { Checkbox } from "@/components/ui/checkbox"
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
-import { DateRangePicker } from "@/components/ui/date-range-picker"
+import { DateTimePicker } from "@/components/ui/date-time-picker"
 import { GPInput } from "@/components/ui/gp-input"
-import { Calendar } from "@/components/ui/calendar"
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover"
-import { CalendarIcon, Info } from "lucide-react"
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  Info,
+  ArrowRight,
+  ArrowLeft,
+  Swords,
+  Shield,
+  Rocket,
+  CheckCircle2,
+} from "lucide-react"
 import { format, differenceInDays, addDays } from "date-fns"
+import { fromZonedTime } from "date-fns-tz"
 import { cn } from "@/lib/utils"
-import type { DateRange } from "react-day-picker"
 
 interface CreateEventModalProps {
   isOpen: boolean
@@ -41,11 +49,28 @@ interface CreateEventModalProps {
 
 interface FormErrors {
   title?: string
-  description?: string
-  dateRange?: string
+  startDate?: string
+  endDate?: string
   registrationDeadline?: string
   minimumBuyIn?: string
   basePrizePool?: string
+}
+
+const slideVariants = {
+  enter: (direction: number) => ({
+    x: direction > 0 ? 20 : -20,
+    opacity: 0,
+  }),
+  center: {
+    zIndex: 1,
+    x: 0,
+    opacity: 1,
+  },
+  exit: (direction: number) => ({
+    zIndex: 0,
+    x: direction < 0 ? 20 : -20,
+    opacity: 0,
+  }),
 }
 
 export function CreateEventModal({
@@ -54,126 +79,140 @@ export function CreateEventModal({
   onEventCreated,
 }: CreateEventModalProps) {
   const router = useRouter()
+  const [step, setStep] = useState(1)
+  const [direction, setDirection] = useState(1)
+
   const [title, setTitle] = useState("")
   const [description, setDescription] = useState("")
   const [gameType, setGameType] = useState<"osrs" | "rs3">("osrs")
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined)
+  const [startDate, setStartDate] = useState<Date | undefined>(undefined)
+  const [endDate, setEndDate] = useState<Date | undefined>(undefined)
   const [registrationDeadline, setRegistrationDeadline] = useState<
     Date | undefined
   >(undefined)
   const [minimumBuyIn, setMinimumBuyIn] = useState(0)
   const [basePrizePool, setBasePrizePool] = useState(0)
+  const [timezone, setTimezone] = useState<string>(
+    Intl.DateTimeFormat().resolvedOptions().timeZone
+  )
   const [requiresApproval, setRequiresApproval] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [errors, setErrors] = useState<FormErrors>({})
 
+  const totalSteps = 4
+
+  // Reset step on close
+  useEffect(() => {
+    if (!isOpen) {
+      setTimeout(() => {
+        setStep(1)
+        setDirection(1)
+      }, 300)
+    }
+  }, [isOpen])
+
   // Auto-set end date to start date + 7 days when start date is selected
   useEffect(() => {
-    if (dateRange?.from && !dateRange?.to) {
-      setDateRange({
-        from: dateRange.from,
-        to: addDays(dateRange.from, 7),
-      })
+    if (startDate && !endDate) {
+      setEndDate(addDays(startDate, 7))
     }
-  }, [dateRange?.from, dateRange?.to])
+  }, [startDate, endDate])
 
-  // Calculate event duration
   const eventDuration = useMemo(() => {
-    if (!dateRange?.from || !dateRange?.to) return null
-    const days = differenceInDays(dateRange.to, dateRange.from) + 1
+    if (!startDate || !endDate) return null
+    const days = differenceInDays(endDate, startDate) + 1
     return days === 1 ? "1 day" : `${days} days`
-  }, [dateRange])
+  }, [startDate, endDate])
 
-  // Validate form in real-time
-  const validateForm = (): FormErrors => {
+  const validateStep = (currentStep: number): boolean => {
     const newErrors: FormErrors = {}
+    let isValid = true
 
-    // Title validation
-    if (!title.trim()) {
-      newErrors.title = "Title is required"
-    } else if (title.trim().length < 3) {
-      newErrors.title = "Title must be at least 3 characters"
-    } else if (title.length > 100) {
-      newErrors.title = "Title must be less than 100 characters"
-    }
-
-    // Date range validation
-    if (!dateRange?.from || !dateRange?.to) {
-      newErrors.dateRange = "Event start and end dates are required"
-    } else if (dateRange.from > dateRange.to) {
-      newErrors.dateRange = "End date must be after start date"
-    }
-
-    // Registration deadline validation
-    if (registrationDeadline && dateRange?.from) {
-      if (registrationDeadline >= dateRange.from) {
-        newErrors.registrationDeadline =
-          "Registration deadline must be before event start date"
+    if (currentStep === 1) {
+      if (!title.trim()) {
+        newErrors.title = "Title is required"
+        isValid = false
+      } else if (title.trim().length < 3) {
+        newErrors.title = "Title must be at least 3 characters"
+        isValid = false
+      }
+    } else if (currentStep === 2) {
+      if (!startDate) {
+        newErrors.startDate = "Event start date is required"
+        isValid = false
+      }
+      if (!endDate) {
+        newErrors.endDate = "Event end date is required"
+        isValid = false
+      }
+      if (registrationDeadline && startDate) {
+        if (registrationDeadline >= startDate) {
+          newErrors.registrationDeadline =
+            "Registration deadline must be before event start date"
+          isValid = false
+        }
+      }
+    } else if (currentStep === 3) {
+      if (minimumBuyIn < 0) {
+        newErrors.minimumBuyIn = "Buy-in cannot be negative"
+        isValid = false
+      }
+      if (basePrizePool < 0) {
+        newErrors.basePrizePool = "Prize pool cannot be negative"
+        isValid = false
       }
     }
 
-    // Financial validation
-    if (minimumBuyIn < 0) {
-      newErrors.minimumBuyIn = "Buy-in cannot be negative"
-    }
-
-    if (basePrizePool < 0) {
-      newErrors.basePrizePool = "Prize pool cannot be negative"
-    }
-
-    return newErrors
+    setErrors(newErrors)
+    return isValid
   }
 
-  // Check if form is valid
-  const isFormValid = useMemo(() => {
-    const formErrors = validateForm()
-    return Object.keys(formErrors).length === 0
-  }, [title, dateRange, registrationDeadline, minimumBuyIn, basePrizePool])
-
-  // Update errors on field changes
-  useEffect(() => {
-    if (Object.keys(errors).length > 0) {
-      setErrors(validateForm())
+  const handleNext = () => {
+    if (validateStep(step)) {
+      setDirection(1)
+      setStep((prev) => Math.min(prev + 1, totalSteps))
     }
-  }, [title, dateRange, registrationDeadline, minimumBuyIn, basePrizePool])
+  }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleBack = () => {
+    setDirection(-1)
+    setStep((prev) => Math.max(prev - 1, 1))
+  }
 
-    // Validate form
-    const formErrors = validateForm()
-    if (Object.keys(formErrors).length > 0) {
-      setErrors(formErrors)
-      toast({
-        title: "Validation Error",
-        description: "Please fix the errors in the form before submitting.",
-        variant: "destructive",
-      })
-      return
-    }
-
-    if (!dateRange?.from || !dateRange?.to) {
-      toast({
-        title: "Missing required fields",
-        description: "Please select event start and end dates.",
-        variant: "destructive",
-      })
-      return
-    }
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault()
+    if (!validateStep(3)) return // Ensure all fields are valid
+    if (!startDate || !endDate) return
 
     setIsSubmitting(true)
     const formData = new FormData()
     formData.append("title", title.trim())
     formData.append("description", description.trim())
     formData.append("gameType", gameType)
-    formData.append("startDate", dateRange.from.toISOString())
-    formData.append("endDate", dateRange.to.toISOString())
+    formData.append(
+      "startDate",
+      fromZonedTime(
+        format(startDate, "yyyy-MM-dd'T'HH:mm:ss"),
+        timezone
+      ).toISOString()
+    )
+    formData.append(
+      "endDate",
+      fromZonedTime(
+        format(endDate, "yyyy-MM-dd'T'HH:mm:ss"),
+        timezone
+      ).toISOString()
+    )
     if (registrationDeadline) {
       formData.append(
         "registrationDeadline",
-        registrationDeadline.toISOString()
+        fromZonedTime(
+          format(registrationDeadline, "yyyy-MM-dd'T'HH:mm:ss"),
+          timezone
+        ).toISOString()
       )
     }
+    formData.append("timezone", timezone)
     formData.append("minimumBuyIn", minimumBuyIn.toString())
     formData.append("basePrizePool", basePrizePool.toString())
     formData.append("requiresApproval", requiresApproval.toString())
@@ -185,22 +224,18 @@ export function CreateEventModal({
           title: "Event created",
           description: "Your event has been created successfully.",
         })
-
-        // Reset form
         setTitle("")
         setDescription("")
         setGameType("osrs")
-        setDateRange(undefined)
+        setStartDate(undefined)
+        setEndDate(undefined)
         setRegistrationDeadline(undefined)
         setMinimumBuyIn(0)
         setBasePrizePool(0)
         setRequiresApproval(false)
         setErrors({})
-
         onClose()
-        if (onEventCreated) {
-          await onEventCreated()
-        }
+        if (onEventCreated) await onEventCreated()
         router.refresh()
       } else {
         toast({
@@ -210,7 +245,7 @@ export function CreateEventModal({
           variant: "destructive",
         })
       }
-    } catch (error) {
+    } catch (_error) {
       toast({
         title: "Error",
         description: "Failed to create event. Please try again.",
@@ -226,247 +261,376 @@ export function CreateEventModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>Create New Event</DialogTitle>
-            <DialogDescription>
-              Set up a new bingo event for your community.
-            </DialogDescription>
-          </DialogHeader>
+      <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-[600px]">
+        <DialogHeader>
+          <DialogTitle>Create New Event</DialogTitle>
+          <DialogDescription>
+            Step {step} of {totalSteps}:{" "}
+            {step === 1
+              ? "Identity & Theme"
+              : step === 2
+                ? "Scheduling & Time"
+                : step === 3
+                  ? "Financials & Rules"
+                  : "Review & Launch"}
+          </DialogDescription>
+        </DialogHeader>
 
-          <div className="space-y-6 py-6">
-            {/* Event Details Section */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                  Event Details
-                </h3>
-                <div className="h-px flex-1 bg-border" />
-              </div>
+        {/* Progress bar */}
+        <div className="relative my-4 h-2 w-full overflow-hidden rounded-full bg-muted">
+          <motion.div
+            className="h-full bg-primary"
+            initial={{ width: "25%" }}
+            animate={{ width: `${(step / totalSteps) * 100}%` }}
+            transition={{ type: "spring", stiffness: 300, damping: 30 }}
+          />
+        </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="title">
-                  Title <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="title"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="e.g., Summer Bingo Challenge 2026"
-                  maxLength={100}
-                  className={cn(errors.title && "border-destructive")}
-                />
-                <div className="flex items-center justify-between">
-                  {errors.title && (
-                    <p className="text-sm text-destructive">{errors.title}</p>
-                  )}
-                  <p className="ml-auto text-xs text-muted-foreground">
-                    {title.length}/100
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="description">Description</Label>
-                <Textarea
-                  id="description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Describe your event, rules, and what participants can expect..."
-                  rows={4}
-                  maxLength={500}
-                  className="resize-none"
-                />
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground">
-                    Optional: Add details about your event
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {description.length}/500
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label>
-                  Game Type <span className="text-destructive">*</span>
-                </Label>
-                <RadioGroup
-                  value={gameType}
-                  onValueChange={(value) =>
-                    setGameType(value as "osrs" | "rs3")
-                  }
-                >
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="osrs" id="osrs" />
-                    <Label
-                      htmlFor="osrs"
-                      className="cursor-pointer font-normal"
-                    >
-                      Old School RuneScape (OSRS)
+        <div className="relative min-h-[350px] flex-1">
+          <AnimatePresence initial={false} custom={direction} mode="wait">
+            <motion.div
+              key={step}
+              custom={direction}
+              variants={slideVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ type: "spring", stiffness: 300, damping: 30 }}
+              className="absolute inset-0 space-y-6 overflow-y-auto px-1 py-2"
+            >
+              {step === 1 && (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <Label htmlFor="title">
+                      Event Title <span className="text-destructive">*</span>
                     </Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="rs3" id="rs3" />
-                    <Label htmlFor="rs3" className="cursor-pointer font-normal">
-                      RuneScape 3 (RS3)
-                    </Label>
-                  </div>
-                </RadioGroup>
-              </div>
-            </div>
-
-            {/* Schedule Section */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                  Schedule
-                </h3>
-                <div className="h-px flex-1 bg-border" />
-              </div>
-
-              <div className="space-y-2">
-                <Label>
-                  Event Duration <span className="text-destructive">*</span>
-                </Label>
-                <DateRangePicker
-                  value={dateRange}
-                  onChange={setDateRange}
-                  placeholder="Select start and end dates"
-                  fromDate={today}
-                  error={errors.dateRange}
-                />
-                {eventDuration && !errors.dateRange && (
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Info className="h-3.5 w-3.5" />
-                    <span>Event will run for {eventDuration}</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="registrationDeadline">
-                  Registration Deadline
-                </Label>
-                <Popover modal={true}>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className={cn(
-                        "w-full justify-start text-left font-normal",
-                        !registrationDeadline && "text-muted-foreground",
-                        errors.registrationDeadline &&
-                          "border-destructive focus-visible:ring-destructive"
-                      )}
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {registrationDeadline ? (
-                        format(registrationDeadline, "PPP")
-                      ) : (
-                        <span>Optional: Set registration cutoff</span>
-                      )}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <Calendar
-                      mode="single"
-                      selected={registrationDeadline}
-                      onSelect={setRegistrationDeadline}
-                      fromDate={today}
-                      toDate={dateRange?.from}
+                    <Input
+                      id="title"
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      placeholder="e.g., Summer Bingo Challenge 2026"
+                      maxLength={100}
+                      className={cn(errors.title && "border-destructive")}
                     />
-                  </PopoverContent>
-                </Popover>
-                {errors.registrationDeadline && (
-                  <p className="text-sm text-destructive">
-                    {errors.registrationDeadline}
-                  </p>
-                )}
-                {!errors.registrationDeadline && (
-                  <p className="text-xs text-muted-foreground">
-                    Optional: Prevent registrations after this date
-                  </p>
-                )}
-              </div>
-            </div>
+                    {errors.title && (
+                      <p className="text-sm text-destructive">{errors.title}</p>
+                    )}
+                  </div>
 
-            {/* Prizes & Settings Section */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                  Prizes & Settings
-                </h3>
-                <div className="h-px flex-1 bg-border" />
-              </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="description">Description</Label>
+                    <Textarea
+                      id="description"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      placeholder="Describe your event, rules, and what participants can expect..."
+                      rows={3}
+                      maxLength={500}
+                      className="resize-none"
+                    />
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="minimumBuyIn">Minimum Buy-In</Label>
-                <GPInput
-                  id="minimumBuyIn"
-                  value={minimumBuyIn}
-                  onChange={setMinimumBuyIn}
-                  error={errors.minimumBuyIn}
-                />
-                {!errors.minimumBuyIn && (
-                  <p className="text-xs text-muted-foreground">
-                    Minimum gold required for participants to join
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="basePrizePool">Base Prize Pool</Label>
-                <GPInput
-                  id="basePrizePool"
-                  value={basePrizePool}
-                  onChange={setBasePrizePool}
-                  error={errors.basePrizePool}
-                />
-                {!errors.basePrizePool && (
-                  <p className="text-xs text-muted-foreground">
-                    Starting prize pool (grows with buy-ins and donations)
-                  </p>
-                )}
-              </div>
-
-              <div className="flex items-start space-x-3 rounded-lg border p-4">
-                <Checkbox
-                  id="requiresApproval"
-                  checked={requiresApproval}
-                  onCheckedChange={(checked) => setRequiresApproval(!!checked)}
-                  className="mt-0.5"
-                />
-                <div className="space-y-1">
-                  <label
-                    htmlFor="requiresApproval"
-                    className="cursor-pointer text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                  >
-                    Require Admin Approval
-                  </label>
-                  <p className="text-xs text-muted-foreground">
-                    Manually approve each registration request before allowing
-                    participation
-                  </p>
+                  <div className="space-y-3">
+                    <Label>
+                      Game Type <span className="text-destructive">*</span>
+                    </Label>
+                    <div className="grid grid-cols-2 gap-4">
+                      <motion.div
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        className={cn(
+                          "group relative cursor-pointer overflow-hidden rounded-xl border-2 p-4 transition-colors",
+                          gameType === "osrs"
+                            ? "border-primary bg-primary/10"
+                            : "border-border hover:border-primary/50"
+                        )}
+                        onClick={() => setGameType("osrs")}
+                      >
+                        {gameType === "osrs" && (
+                          <div className="absolute right-2 top-2 text-primary">
+                            <CheckCircle2 className="h-5 w-5" />
+                          </div>
+                        )}
+                        <Swords
+                          className={cn(
+                            "mb-3 h-8 w-8",
+                            gameType === "osrs"
+                              ? "text-primary"
+                              : "text-muted-foreground"
+                          )}
+                        />
+                        <h4 className="text-sm font-semibold">
+                          Old School RuneScape
+                        </h4>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          The classic 2007 experience
+                        </p>
+                      </motion.div>
+                      <motion.div
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        className={cn(
+                          "group relative cursor-pointer overflow-hidden rounded-xl border-2 p-4 transition-colors",
+                          gameType === "rs3"
+                            ? "border-primary bg-primary/10"
+                            : "border-border hover:border-primary/50"
+                        )}
+                        onClick={() => setGameType("rs3")}
+                      >
+                        {gameType === "rs3" && (
+                          <div className="absolute right-2 top-2 text-primary">
+                            <CheckCircle2 className="h-5 w-5" />
+                          </div>
+                        )}
+                        <Shield
+                          className={cn(
+                            "mb-3 h-8 w-8",
+                            gameType === "rs3"
+                              ? "text-primary"
+                              : "text-muted-foreground"
+                          )}
+                        />
+                        <h4 className="text-sm font-semibold">RuneScape 3</h4>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          The modern evolution
+                        </p>
+                      </motion.div>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          </div>
+              )}
 
-          <DialogFooter>
+              {step === 2 && (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <Label>Event Timezone</Label>
+                    <Select value={timezone} onValueChange={setTimezone}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select timezone" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Intl.supportedValuesOf("timeZone").map((tz) => (
+                          <SelectItem key={tz} value={tz}>
+                            {tz}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>
+                        Start Date <span className="text-destructive">*</span>
+                      </Label>
+                      <DateTimePicker
+                        date={startDate}
+                        setDate={setStartDate}
+                        fromDate={today}
+                        error={errors.startDate}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>
+                        End Date <span className="text-destructive">*</span>
+                      </Label>
+                      <DateTimePicker
+                        date={endDate}
+                        setDate={setEndDate}
+                        fromDate={startDate || today}
+                        error={errors.endDate}
+                      />
+                    </div>
+                  </div>
+
+                  {eventDuration && !errors.startDate && !errors.endDate && (
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Info className="h-3.5 w-3.5" />
+                      <span>Event will run for {eventDuration}</span>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <Label htmlFor="registrationDeadline">
+                      Registration Deadline
+                    </Label>
+                    <DateTimePicker
+                      date={registrationDeadline}
+                      setDate={setRegistrationDeadline}
+                      fromDate={today}
+                      toDate={startDate}
+                      placeholder="Optional: Set registration cutoff"
+                      error={errors.registrationDeadline}
+                    />
+                    {errors.registrationDeadline && (
+                      <p className="text-sm text-destructive">
+                        {errors.registrationDeadline}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {step === 3 && (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <Label htmlFor="minimumBuyIn">Minimum Buy-In</Label>
+                    <GPInput
+                      id="minimumBuyIn"
+                      value={minimumBuyIn}
+                      onChange={setMinimumBuyIn}
+                      error={errors.minimumBuyIn}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Minimum gold required to participate
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="basePrizePool">Base Prize Pool</Label>
+                    <GPInput
+                      id="basePrizePool"
+                      value={basePrizePool}
+                      onChange={setBasePrizePool}
+                      error={errors.basePrizePool}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Starting prize pool before entry fees
+                    </p>
+                  </div>
+
+                  <div className="flex items-start space-x-3 rounded-xl border bg-muted/20 p-4">
+                    <Checkbox
+                      id="requiresApproval"
+                      checked={requiresApproval}
+                      onCheckedChange={(checked) =>
+                        setRequiresApproval(!!checked)
+                      }
+                      className="mt-0.5"
+                    />
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="requiresApproval"
+                        className="cursor-pointer text-sm font-medium leading-none"
+                      >
+                        Require Admin Approval
+                      </label>
+                      <p className="text-xs text-muted-foreground">
+                        Manually approve each registration request
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {step === 4 && (
+                <div className="space-y-6">
+                  <div className="space-y-4 rounded-xl border bg-muted/30 p-6">
+                    <h3 className="text-lg font-semibold">
+                      {title || "Untitled Event"}
+                    </h3>
+
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <p className="mb-1 text-xs text-muted-foreground">
+                          Game Type
+                        </p>
+                        <div className="flex items-center gap-2 font-medium">
+                          {gameType === "osrs" ? (
+                            <Swords className="h-4 w-4 text-primary" />
+                          ) : (
+                            <Shield className="h-4 w-4 text-primary" />
+                          )}
+                          {gameType === "osrs"
+                            ? "Old School RuneScape"
+                            : "RuneScape 3"}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="mb-1 text-xs text-muted-foreground">
+                          Schedule
+                        </p>
+                        <p className="font-medium">
+                          {startDate
+                            ? format(startDate, "MMM d, yyyy h:mm a")
+                            : "TBD"}{" "}
+                          -{" "}
+                          {endDate
+                            ? format(endDate, "MMM d, yyyy h:mm a")
+                            : "TBD"}
+                        </p>
+                      </div>
+
+                      <div>
+                        <p className="mb-1 text-xs text-muted-foreground">
+                          Buy-In
+                        </p>
+                        <p className="flex items-center gap-1 font-medium text-yellow-500">
+                          {minimumBuyIn.toLocaleString()} GP
+                        </p>
+                      </div>
+
+                      <div>
+                        <p className="mb-1 text-xs text-muted-foreground">
+                          Approval
+                        </p>
+                        <p className="font-medium">
+                          {requiresApproval ? "Required" : "Open"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-center">
+                    <p className="text-sm text-muted-foreground">
+                      Ready to launch your event? You can always edit these
+                      settings later.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
+        <DialogFooter className="mt-8 flex w-full items-center sm:justify-between">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={step === 1 ? onClose : handleBack}
+            disabled={isSubmitting}
+            className="flex items-center gap-2"
+          >
+            {step === 1 ? (
+              "Cancel"
+            ) : (
+              <>
+                <ArrowLeft className="h-4 w-4" /> Back
+              </>
+            )}
+          </Button>
+
+          {step < totalSteps ? (
             <Button
               type="button"
-              variant="outline"
-              onClick={onClose}
-              disabled={isSubmitting}
+              onClick={handleNext}
+              className="flex items-center gap-2"
             >
-              Cancel
+              Next Step <ArrowRight className="h-4 w-4" />
             </Button>
-            <Button type="submit" disabled={isSubmitting || !isFormValid}>
-              {isSubmitting ? "Creating..." : "Create Event"}
+          ) : (
+            <Button
+              type="button"
+              onClick={handleSubmit}
+              disabled={isSubmitting}
+              className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              {isSubmitting ? "Launching..." : "Launch Event"}
+              {!isSubmitting && <Rocket className="h-4 w-4" />}
             </Button>
-          </DialogFooter>
-        </form>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )

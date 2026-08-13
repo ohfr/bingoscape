@@ -166,15 +166,71 @@
     {
       "idx": 23,
       "version": "7",
-      "when": 1777300000000,
-      "tag": "0023_battleship_bingo",
+      "when": 1783073586716,
+      "tag": "0023_gifted_whistler",
       "breakpoints": true
     },
     {
       "idx": 24,
       "version": "7",
-      "when": 1777365600000,
-      "tag": "0024_battleship_ship_tile_scope_fix",
+      "when": 1783208174745,
+      "tag": "0024_workable_ikaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1783246666029,
+      "tag": "0025_watery_mathemanic",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1783280843981,
+      "tag": "0026_slippery_james_howlett",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1783291519181,
+      "tag": "0027_happy_nekra",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1783325765334,
+      "tag": "0028_tiresome_wiccan",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1784538395768,
+      "tag": "0029_tidy_thaddeus_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784802018249,
+      "tag": "0030_wonderful_rocket_racer",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1786600000000,
+      "tag": "0031_battleship_bingo",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1786600000001,
+      "tag": "0032_battleship_ship_tile_scope_fix",
       "breakpoints": true
     }
   ]
